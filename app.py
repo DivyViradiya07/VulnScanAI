@@ -14,7 +14,7 @@ if project_root_dir not in sys.path:
 try:
     from chatbot_modules.pdf_extractor import extract_text_from_pdf
     from chatbot_modules.nmap_parser import parse_nmap_report, process_nmap_report_file
-    from chatbot_modules.local_llm import load_llm, generate_response
+    from chatbot_modules.local_llm import load_model, generate_response
 except ImportError as e:
     print(f"Error importing from chatbot_modules: {e}")
     print("Current Python path:", sys.path)
@@ -33,10 +33,10 @@ except ImportError as e:
     print("Please install them using: pip install sentence-transformers pinecone-client python-dotenv")
     sys.exit(1)
 
-# --- Configuration for Local LLM ---
-LLM_MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
-LLM_MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
-LLM_LOCAL_DIR = os.path.join(project_root_dir, "pretrained_language_model")
+# --- Configuration for Local Language Model ---
+MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
+MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
+MODEL_LOCAL_DIR = os.path.join(project_root_dir, "pretrained_language_model")
 
 # --- Configuration for Semantic Search Model and Pinecone ---
 SEMANTIC_MODEL_PATH = os.path.join(project_root_dir, "fine_tuned_owasp_model_advanced")
@@ -50,24 +50,23 @@ PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1") # Default 
 
 # Global variables
 current_loaded_report_data = None
-llm_instance = None
+model_instance = None
 semantic_model = None # For the SentenceTransformer model
 pinecone_index = None # For the Pinecone connection
 
 
-def load_llm_once():
-    """Loads the local LLM instance globally if not already loaded."""
-    global llm_instance
-    if llm_instance is None:
-        print(f"Attempting to load Local LLM from {LLM_LOCAL_DIR}...")
+def load_model_once():
+    """Loads the local language model instance globally if not already loaded."""
+    global model_instance
+    if model_instance is None:
+        print(f"Attempting to load local language model from {MODEL_LOCAL_DIR}...")
         try:
-            llm_instance = load_llm(LLM_MODEL_ID, LLM_MODEL_BASENAME, LLM_LOCAL_DIR)
-            print("Local LLM successfully initialized.")
+            model_instance = load_model(MODEL_ID, MODEL_BASENAME, MODEL_LOCAL_DIR)
+            print("Local language model successfully initialized.")
         except Exception as e:
-            print(f"Failed to load Local LLM: {e}")
-            llm_instance = None # Ensure it remains None on failure
-            return False
-    return llm_instance is not None
+            print(f"Failed to load local language model: {e}")
+            model_instance = None # Ensure it remains None on failure
+    return model_instance is not None
 
 def load_semantic_model_once():
     """Loads the SentenceTransformer model for semantic search globally if not already loaded."""
@@ -167,20 +166,20 @@ def retrieve_from_pinecone(query: str, top_k: int = 3, namespace: Optional[str] 
 def answer_query_about_report(user_query: str) -> str:
     """
     Answers a user query, intelligently routing between the Nmap report data
-    and the Pinecone knowledge base, then uses the LLM to synthesize the response.
+    and the Pinecone knowledge base, then uses the language model to synthesize the response.
 
     Args:
         user_query (str): The question from the user.
 
     Returns:
-        str: The LLM-generated answer.
+        str: The language model-generated answer.
     """
-    global current_loaded_report_data, llm_instance
+    global current_loaded_report_data, model_instance
 
-    if not load_llm_once():
+    if not load_model_once():
         return "Sorry, the main language model is not loaded. Please try again later."
 
-    context_for_llm = ""
+    context_for_model = ""
     source_of_context = "no_context"
 
     # --- Routing Logic: Nmap Report Specific vs. General KB Query ---
@@ -294,7 +293,7 @@ def answer_query_about_report(user_query: str) -> str:
 
 
         if extracted_nmap_snippets:
-            context_for_llm = "\n\n".join(extracted_nmap_snippets)
+            context_for_model = "\n\n".join(extracted_nmap_snippets)
             source_of_context = "nmap_report"
         else:
             # If Nmap-specific keywords were used but no data extracted, revert to Pinecone/general
@@ -317,15 +316,15 @@ def answer_query_about_report(user_query: str) -> str:
         if pinecone_results:
             context_items = []
             for item in pinecone_results:
-                # Include answer as it's the most useful part from Pinecone for the LLM
+                # Include answer as it's the most useful part from Pinecone for the language model
                 context_items.append(f"Question: {item['question']}\nAnswer: {item['answer']}\nSource: {item['source']}")
-            context_for_llm = "\n---\n".join(context_items)
+            context_for_model = "\n---\n".join(context_items)
             source_of_context = "pinecone_kb"
         else:
-            print("No relevant information found in Pinecone. Relying on general LLM knowledge.")
+            print("No relevant information found in Pinecone. Relying on general language model knowledge.")
             source_of_context = "no_context"
 
-    # --- Construct the LLM Prompt ---
+    # --- Construct the Model Prompt ---
     system_instruction = (
         "You are a highly skilled cybersecurity analyst and an expert in Nmap reports. "
         "Your primary goal is to provide accurate, concise, and actionable answers to user queries. "
@@ -334,7 +333,7 @@ def answer_query_about_report(user_query: str) -> str:
 
     if source_of_context == "nmap_report":
         user_prompt = (
-            f"The following are relevant snippets from a structured Nmap scan report:\n```\n{context_for_llm}\n```\n\n"
+            f"The following are relevant snippets from a structured Nmap scan report:\n```\n{context_for_model}\n```\n\n"
             f"Based *only* on this Nmap report data, please answer the following question:\n"
             f"User Query: {user_query}\n\n"
             "If the information is not explicitly available in the provided Nmap scan data, state that the information is not found in the report. "
@@ -343,13 +342,13 @@ def answer_query_about_report(user_query: str) -> str:
     elif source_of_context == "pinecone_kb":
         # Enhanced prompt for mitigation and action when Pinecone is used
         user_prompt = (
-            f"The following are relevant knowledge snippets from a cybersecurity knowledge base:\n```\n{context_for_llm}\n```\n\n"
+            f"The following are relevant knowledge snippets from a cybersecurity knowledge base:\n```\n{context_for_model}\n```\n\n"
             f"Based *only* on these snippets, please answer the following question. "
             "If the user's query asks for 'how to', 'prevent', 'mitigate', 'close', 'secure', or 'fix', prioritize providing actionable steps and recommendations found in the snippets. "
             "Do not fabricate information. If the information is not explicitly available in the provided snippets, state that you cannot answer based on the given context. "
             f"User Query: {user_query}\n\n"
         )
-    else: # No specific context found, rely on LLM's general knowledge
+    else: # No specific context found, rely on language model's general knowledge
         user_prompt = (
             f"I do not have specific context for the following question, but please answer it based on your general cybersecurity knowledge. "
             f"If you are unsure or the question is outside your scope, please state so politely.\n"
@@ -358,26 +357,26 @@ def answer_query_about_report(user_query: str) -> str:
 
     full_prompt = f"<s>[INST] {system_instruction}\n\n{user_prompt} [/INST]"
 
-    # Step 4: Generate a response from the LLM
+    # Step 4: Generate a response from the language model
     try:
-        answer = generate_response(llm_instance, full_prompt, max_tokens=1500)
+        answer = generate_response(model_instance, full_prompt, max_tokens=1500)
         return answer
     except Exception as e:
-        print(f"Error generating LLM response for query: {e}")
+        print(f"Error generating language model response for query: {e}")
         return "Sorry, I encountered an error while trying to answer your question."
 
 
 def process_and_summarize_report(pdf_path: str) -> Optional[str]:
     """
-    Processes a given Nmap PDF report and generates an initial summary using the LLM.
+    Processes a given Nmap PDF report and generates an initial summary using the language model.
 
     Args:
         pdf_path (str): The full path to the Nmap PDF report.
 
     Returns:
-        Optional[str]: The LLM-generated summary, or None if processing fails.
+        Optional[str]: The language model-generated summary, or None if processing fails.
     """
-    global current_loaded_report_data, llm_instance
+    global current_loaded_report_data, model_instance
 
     if not os.path.exists(pdf_path):
         print(f"Error: File not found at '{pdf_path}'")
@@ -402,11 +401,11 @@ def process_and_summarize_report(pdf_path: str) -> Optional[str]:
         current_loaded_report_data = None
         return None
 
-    if not load_llm_once():
-        print("LLM is not loaded. Cannot generate summary.")
+    if not load_model_once():
+        print("Language model is not loaded. Cannot generate summary.")
         return None
 
-    # Step 3: Craft a prompt for the LLM based on the structured data
+    # Step 3: Craft a prompt for the language model based on the structured data
     report_json_str = json.dumps(current_loaded_report_data, indent=2)
 
     prompt = (
@@ -421,103 +420,135 @@ def process_and_summarize_report(pdf_path: str) -> Optional[str]:
         "Please provide your summary and recommendations:"
     )
 
-    # Step 4: Generate a response from the LLM
-    print("--- Generating summary with LLM ---")
+    # Step 4: Generate a response from the language model
+    print("--- Generating summary using language model ---")
     try:
-        summary = generate_response(llm_instance, prompt, max_tokens=1000)
-        print("LLM summary generation complete.")
+        summary = generate_response(model_instance, prompt, max_tokens=1000)
+        print("Language model summary generation complete.")
         return summary
     except Exception as e:
-        print(f"Error generating LLM summary: {e}")
+        print(f"Error generating language model summary: {e}")
         return None
+
+def print_header():
+    """Print a clean header for the application."""
+    print("\n" + "=" * 70)
+    print("  Nmap Report Analyzer & Cybersecurity Assistant")
+    print("=" * 70)
+
+def print_section(title):
+    """Print a section header."""
+    print(f"\n{' ' + title + ' ':-^70}")
+
+def print_help():
+    """Display help information."""
+    print_section("HELP")
+    print("  Commands:")
+    print("  - new report : Load a different Nmap report")
+    print("  - help      : Show this help message")
+    print("  - exit      : Exit the application")
+    print("\n  Ask questions about the loaded Nmap report or general cybersecurity topics.")
 
 def main_cli_interface():
     """
-    Provides a simple command-line interface for uploading and summarizing Nmap reports,
-    then allows for interactive Q&A.
+    Provides a clean command-line interface for uploading and summarizing Nmap reports,
+    with improved readability and user experience.
     """
-    print("Welcome to the Nmap Report Analyzer Chatbot!")
-    print("To start, please provide the path to your Nmap PDF report.")
-    print("Type 'exit' to quit at any time.")
-    print("Type 'new report' to load a different Nmap report.")
+    print_header()
+    print("\nWelcome! Upload an Nmap PDF report to begin analysis.")
+    print("Type 'help' for commands or 'exit' to quit.\n")
 
     while True:
-        pdf_file_path_input = input("\nEnter PDF report path (e.g., reports/my_scan.pdf) or 'exit': ").strip()
+        try:
+            # Get user input with a clear prompt
+            user_input = input("\n[?] Enter PDF path or command: ").strip()
 
-        if pdf_file_path_input.lower() == 'exit':
-            print("Exiting chatbot. Goodbye!")
-            break
-
-        # Resolve the full path
-        if not os.path.isabs(pdf_file_path_input):
-            # Assumes 'reports' directory is at the project root
-            reports_dir = os.path.join(project_root_dir, "reports")
-            pdf_file_path = os.path.join(reports_dir, os.path.basename(pdf_file_path_input))
-        else:
-            pdf_file_path = pdf_file_path_input
-
-        if not os.path.isfile(pdf_file_path):
-            print(f"Error: No file found at '{pdf_file_path}'. Please check the path and try again.")
-            continue
-        if not pdf_file_path.lower().endswith('.pdf'):
-            print(f"Error: '{pdf_file_path}' is not a PDF file. Please provide a PDF.")
-            continue
-
-        print(f"Loading and analyzing report: {os.path.basename(pdf_file_path)}")
-        summary = process_and_summarize_report(pdf_file_path)
-
-        if summary:
-            print("\n" + "="*80)
-            print("LLM Generated Summary:")
-            print(summary)
-            print("="*80 + "\n")
-
-            print("Report loaded. You can now ask questions about this report or general cybersecurity topics.")
-            print("Type 'new report' to load another, or 'exit' to quit.")
-
-            # Enter Q&A loop
-            while True:
-                user_question = input("\nAsk a question (e.g., 'What open ports?', 'What is XSS?', 'new report', 'exit'): ").strip()
-
-                if user_question.lower() == 'exit':
-                    print("Exiting chatbot. Goodbye!")
-                    sys.exit(0) # Exit entirely
-                elif user_question.lower() == 'new report':
-                    print("\nInitiating new report upload...")
-                    current_loaded_report_data = None # Clear previous report data
-                    break # Break from Q&A loop to go back to report upload
+            if user_input.lower() == 'exit':
+                print("\n[+] Thank you for using Nmap Report Analyzer. Goodbye!")
+                return
                 
-                print("Thinking...")
-                answer = answer_query_about_report(user_question)
-                print("\n" + "-"*80)
-                print("LLM Answer:")
-                print(answer)
-                print("-"*80 + "\n")
-        else:
-            print("\nFailed to process the report. Please check the file and try again.")
+            if user_input.lower() == 'help':
+                print_help()
+                continue
+                
+            if not user_input:
+                print("[!] Please enter a file path or command.")
+                continue
+
+            # Process the Nmap report
+            print("\n[+] Processing Nmap report...")
+            summary = process_and_summarize_report(user_input)
+            
+            if summary:
+                print_section("REPORT SUMMARY")
+                print(summary)
+                print_section("INTERACTIVE ANALYSIS")
+                print("You can now ask questions about the report or cybersecurity topics.")
+                print("Type 'new report' to analyze a different scan or 'exit' to quit.\n")
+                
+                # Interactive Q&A loop
+                while True:
+                    try:
+                        question = input("\n[?] Your question: ").strip()
+                        
+                        if not question:
+                            continue
+                            
+                        if question.lower() == 'exit':
+                            print("\n[+] Thank you for using Nmap Report Analyzer. Goodbye!")
+                            return
+                            
+                        if question.lower() == 'new report':
+                            print("\n[+] Loading new report...")
+                            current_loaded_report_data = None
+                            break
+                            
+                        if question.lower() == 'help':
+                            print_help()
+                            continue
+                        
+                        print("\n[+] Analyzing your question...")
+                        answer = answer_query_about_report(question)
+                        
+                        print("\n[+] Analysis Results:")
+                        print("-" * 70)
+                        print(answer)
+                        print("-" * 70)
+                        
+                    except KeyboardInterrupt:
+                        print("\n[!] Operation cancelled. Type 'exit' to quit or continue asking questions.")
+                    except Exception as e:
+                        print(f"\n[!] Error processing your question: {str(e)}")
+            else:
+                print("\n[!] Failed to process the report. Please check the file and try again.")
+                
+        except KeyboardInterrupt:
+            print("\n[!] Operation cancelled. Type 'exit' to quit or enter a file path.")
+        except Exception as e:
+            print(f"\n[!] An error occurred: {str(e)}")
 
 def cleanup():
     """Cleanup function to properly close resources."""
-    global llm_instance
-    if llm_instance is not None:
+    global model_instance
+    if model_instance is not None:
         try:
-            # Properly close the LLM instance if it has a close method
-            if hasattr(llm_instance, 'close') and callable(getattr(llm_instance, 'close')):
-                llm_instance.close()
-            llm_instance = None
+            # Properly close the language model instance if it has a close method
+            if hasattr(model_instance, 'close') and callable(getattr(model_instance, 'close')):
+                model_instance.close()
+            model_instance = None
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
 def main():
     try:
-        # Ensure local LLM and semantic search model/Pinecone are ready
+        # Ensure local language model and semantic search model/Pinecone are ready
         print("Initializing components...")
-        llm_ready = load_llm_once()
+        model_ready = load_model_once()
         semantic_model_ready = load_semantic_model_once()
         pinecone_ready = initialize_pinecone_client_once()
 
-        if not llm_ready:
-            print("Cannot start application without the local LLM. Please check configuration and model files.")
+        if not model_ready:
+            print("Cannot start application without the local language model. Please check configuration and model files.")
             return 1
         
         if not (semantic_model_ready and pinecone_ready):
