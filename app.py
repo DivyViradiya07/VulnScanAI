@@ -807,7 +807,7 @@ def main_cli_interface():
                     pdf_file_path_input = user_input
 
                 # Resolve the full path
-                reports_dir = os.path.join(project_root_dir, "nmap_reports_data")
+                reports_dir = os.path.join(project_root_dir, "documents")
                 # Use os.path.join with reports_dir and then os.path.basename of pdf_file_path_input
                 # to handle cases where user pastes a full path vs just a filename
                 pdf_file_path = os.path.join(reports_dir, os.path.basename(pdf_file_path_input))

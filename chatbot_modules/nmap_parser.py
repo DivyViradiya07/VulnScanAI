@@ -402,7 +402,7 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root_dir)
     
     # Use the nmap_reports_data directory in the project root
-    pdf_reports_directory = os.path.join(project_root_dir, "nmap_reports_data")
+    pdf_reports_directory = os.path.join(project_root_dir, "documents")
     
     print(f"Looking for Nmap PDF files in: {pdf_reports_directory}\n")
 
