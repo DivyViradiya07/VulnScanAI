@@ -1,24 +1,35 @@
 import os
 import json
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util # Added util for cosine similarity
 from pinecone import Pinecone, ServerlessSpec, PodSpec
 from typing import Dict, Any, List, Optional
 import dotenv
+import uuid # Added for generating unique namespace IDs
+import sys
 
+# Load environment variables from a .env file (if present)
 dotenv.load_dotenv()
 
-# --- Configuration for RAG Components ---
-# This path should point to the directory where your fine-tuned SentenceTransformer model is saved.
-# This is typically the output path from S1-2_Model_Retraining.ipynb
-# Example: r'D:\OWASP_BERT\fine_tuned_owasp_model_advanced'
-MODEL_PATH = r"D:\VulnScanAI_Chatbot\fine_tuned_owasp_model_advanced"
+# Add the project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-# Pinecone configuration
-PINECONE_INDEX_NAME = "owasp-qa"
-# Ensure your Pinecone environment and API key are set as environment variables
-# For local development, you might set them in your shell or use a .env file (not included here for simplicity)
+# Import configuration settings from the config module
+from chatbot_modules.config import (
+    RAG_EMBEDDING_MODEL_PATH,
+    PINECONE_INDEX_NAME,
+    PINECONE_EMBEDDING_DIMENSION,
+    PINECONE_METRIC,
+    PINECONE_CLOUD,
+    PINECONE_REGION,
+    DEFAULT_RAG_TOP_K
+)
+
+# Pinecone API Key and Environment are still fetched from os.environ
+# as recommended for sensitive information
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
-PINECONE_ENVIRONMENT = os.environ.get("PINECONE_ENVIRONMENT") # e.g., "gcp-starter" or your specific environment
+PINECONE_ENVIRONMENT = os.environ.get("PINECONE_ENVIRONMENT")
 
 
 # Global variables to store loaded RAG components
@@ -33,12 +44,12 @@ def load_embedding_model() -> SentenceTransformer:
     """
     global _embedding_model
     if _embedding_model is None:
-        print(f"Loading SentenceTransformer model from: {MODEL_PATH}")
+        print(f"Loading SentenceTransformer model from: {RAG_EMBEDDING_MODEL_PATH}")
         try:
-            _embedding_model = SentenceTransformer(MODEL_PATH)
+            _embedding_model = SentenceTransformer(RAG_EMBEDDING_MODEL_PATH)
             print("SentenceTransformer model loaded successfully.")
         except Exception as e:
-            print(f"Error loading SentenceTransformer model from {MODEL_PATH}: {e}")
+            print(f"Error loading SentenceTransformer model from {RAG_EMBEDDING_MODEL_PATH}: {e}")
             print("Please ensure the model path is correct and the model was saved properly (from S1-2_Model_Retraining.ipynb).")
             raise
     return _embedding_model
@@ -60,26 +71,24 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
         try:
             pc = Pinecone(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
             
-            # Check if index exists, if not, create it (assuming a serverless setup here)
-            existing_indexes = [index.name for index in pc.list_indexes()]
+            # Check if index exists, if not, create it
+            existing_indexes = [index_info.name for index_info in pc.list_indexes()]
             if PINECONE_INDEX_NAME not in existing_indexes:
                 print(f"Pinecone index '{PINECONE_INDEX_NAME}' not found. Creating it...")
-                # You need to know the dimension of your embeddings (e.g., 768 for all-mpnet-base-v2)
-                # and the metric (cosine). This should match your S2_Embedding_Generation.ipynb.
-                # For serverless:
+                
+                # Determine spec based on your setup (Serverless vs PodSpec)
+                # This should match how you created your index in S2_Embedding_Generation.ipynb
+                if PINECONE_CLOUD and PINECONE_REGION: # Assuming Serverless if cloud/region are provided
+                    spec = ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION)
+                else: # Fallback to PodSpec if specific cloud/region for Serverless are not set
+                    spec = PodSpec(environment=PINECONE_ENVIRONMENT)
+
                 pc.create_index(
                     name=PINECONE_INDEX_NAME,
-                    dimension=load_embedding_model().get_sentence_embedding_dimension(), # Dynamically get dimension
-                    metric="cosine",
-                    spec=ServerlessSpec(cloud="aws", region="us-east-1") # Adjust cloud/region as per your Pinecone setup
+                    dimension=PINECONE_EMBEDDING_DIMENSION,
+                    metric=PINECONE_METRIC,
+                    spec=spec
                 )
-                # For pod-based:
-                # pc.create_index(
-                #     name=PINECONE_INDEX_NAME,
-                #     dimension=load_embedding_model().get_sentence_embedding_dimension(),
-                #     metric="cosine",
-                #     spec=PodSpec(environment=PINECONE_ENVIRONMENT)
-                # )
                 print(f"Pinecone index '{PINECONE_INDEX_NAME}' created.")
             
             _pinecone_index = pc.Index(PINECONE_INDEX_NAME)
@@ -89,14 +98,14 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
             raise
     return _pinecone_index
 
-def retrieve_rag_context(query: str, top_k: int = 3, namespace: str = "owasp-cybersecurity-kb") -> str:
+def retrieve_rag_context(query: str, top_k: int = DEFAULT_RAG_TOP_K, namespace: str = "owasp-cybersecurity-kb") -> str:
     """
     Generates an embedding for the query, queries Pinecone, and returns formatted context.
 
     Args:
         query (str): The user's question.
         top_k (int): The number of top relevant results to retrieve.
-        namespace (str): The Pinecone namespace to query.
+        namespace (str): The Pinecone namespace to query. (Kept hardcoded as it's a specific logical unit)
 
     Returns:
         str: Formatted retrieved context from the knowledge base, or an empty string if none found.
@@ -118,9 +127,6 @@ def retrieve_rag_context(query: str, top_k: int = 3, namespace: str = "owasp-cyb
 
         context_parts = []
         for match in response.matches:
-            # You can adjust how you format the retrieved context.
-            # Here, we're taking the 'answer' from the metadata.
-            # Make sure 'answer' (and 'question') are stored in metadata in S2_Embedding_Generation.ipynb
             metadata = match.metadata
             if metadata and "answer" in metadata:
                 context_parts.append(f"Q: {metadata.get('question', 'N/A')}\nA: {metadata['answer']}")
@@ -136,43 +142,361 @@ def retrieve_rag_context(query: str, top_k: int = 3, namespace: str = "owasp-cyb
         print(f"Error during RAG context retrieval: {e}")
         return f"Error retrieving context: {e}"
 
+
+def _chunk_nmap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]: # Changed return type to include metadata
+    """
+    Extracts meaningful text chunks from parsed Nmap report data.
+    Each chunk represents a specific finding or detail from the report,
+    along with metadata.
+    """
+    chunks = []
+    metadata = parsed_data.get("scan_metadata", {})
+    
+    # Chunk 1: Overall summary
+    chunks.append({
+        "text": f"Nmap Scan Summary: Target {metadata.get('target', 'N/A')}, Type {metadata.get('scan_type', 'N/A')}.",
+        "id_suffix": "summary"
+    })
+
+    for i, host in enumerate(parsed_data.get("hosts", [])):
+        host_ip = host.get('ip_address', 'N/A')
+        host_hostname = host.get('hostname', 'N/A')
+        host_info = f"Host {host_hostname} ({host_ip})"
+
+        # Chunk for host status and OS
+        chunks.append({
+            "text": f"{host_info} status: {host.get('status', 'N/A')}. OS: {', '.join(host.get('os_detection', {}).get('os_guesses', ['N/A']))}.",
+            "id_suffix": f"host_info_{host_ip}"
+        })
+
+        for port in host.get("ports", []):
+            port_id = port.get('port_id')
+            protocol = port.get('protocol')
+            service = port.get('service')
+            version = port.get('version', 'N/A')
+            state = port.get('state')
+
+            port_info_text = (
+                f"{host_info} has port {port_id}/{protocol} "
+                f"({service}, version: {version}) in state: {state}."
+            )
+            chunks.append({
+                "text": port_info_text,
+                "id_suffix": f"port_{host_ip}_{port_id}_{protocol}"
+            })
+
+            if port.get('script_outputs'):
+                for script_name, script_output in port['script_outputs'].items():
+                    # Limit script output length for chunking
+                    script_chunk_text = f"{host_info} port {port_id}/{protocol} script output for {script_name}: {script_output[:300]}..."
+                    chunks.append({
+                        "text": script_chunk_text,
+                        "id_suffix": f"script_{host_ip}_{port_id}_{script_name.replace(' ', '_')}"
+                    })
+    return chunks
+
+def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]: # Changed return type to include metadata
+    """
+    Extracts meaningful text chunks from parsed ZAP report data.
+    Each chunk represents a specific vulnerability instance, along with metadata.
+    """
+    chunks = []
+    metadata = parsed_data.get("scan_metadata", {})
+    
+    # Chunk 1: Overall summary
+    chunks.append({
+        "text": f"ZAP Scan Summary: Site {metadata.get('site', 'N/A')}, total alerts: {parsed_data.get('summary', {}).get('total_alerts', 0)}.",
+        "id_suffix": "summary"
+    })
+
+    for i, vuln in enumerate(parsed_data.get("vulnerabilities", [])):
+        vuln_name = vuln.get('name', 'N/A')
+        vuln_risk = vuln.get('risk', 'N/A')
+        vuln_desc = vuln.get('description', 'N/A')
+        vuln_solution = vuln.get('solution', 'N/A')
+        cwe_id = vuln.get('cwe_id', 'N/A')
+        wasc_id = vuln.get('wasc_id', 'N/A')
+
+        # Base chunk for the vulnerability
+        base_vuln_chunk = {
+            "text": (
+                f"Vulnerability: {vuln_name} (Risk: {vuln_risk}). "
+                f"Description: {vuln_desc[:500]}... " # Increased desc length for better context
+                f"Solution: {vuln_solution[:500]}..." # Increased solution length
+                f"CWE-ID: {cwe_id}, WASC-ID: {wasc_id}."
+            ),
+            "id_suffix": f"vuln_{vuln_name.replace(' ', '_')}_{i}"
+        }
+        chunks.append(base_vuln_chunk)
+
+        # Add chunks for individual affected URLs/instances
+        for j, instance in enumerate(vuln.get('urls', [])):
+            instance_url = instance.get('url', 'N/A')
+            instance_method = instance.get('method', 'N/A')
+            instance_param = instance.get('parameter', 'N/A')
+            instance_attack = instance.get('attack', 'N/A')
+            instance_evidence = instance.get('evidence', 'N/A')
+
+            instance_chunk_text = (
+                f"Instance of '{vuln_name}' at URL: {instance_url}, "
+                f"Method: {instance_method}, Parameter: {instance_param}, "
+                f"Attack: {instance_attack[:200]}..., Evidence: {instance_evidence[:200]}..."
+            )
+            chunks.append({
+                "text": instance_chunk_text,
+                "id_suffix": f"instance_{vuln_name.replace(' ', '_')}_{j}"
+            })
+    return chunks
+
+
+def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report_type: str) -> str:
+    """
+    Orchestrates the chunking and embedding process for a newly loaded report,
+    and upserts them into a temporary Pinecone namespace unique to the session.
+    Returns the generated namespace ID.
+    """
+    embedding_model = load_embedding_model() # Ensure model is loaded
+    pinecone_index = initialize_pinecone_index() # Ensure index is initialized
+
+    if report_type.lower() == "nmap":
+        raw_chunks_with_metadata = _chunk_nmap_report(parsed_report_data)
+    elif report_type.lower() == "zap":
+        raw_chunks_with_metadata = _chunk_zap_report(parsed_report_data)
+    else:
+        print(f"Warning: Unknown report type '{report_type}'. Cannot chunk report.")
+        return ""
+
+    if not raw_chunks_with_metadata:
+        print(f"No chunks generated for the {report_type.upper()} report.")
+        return ""
+
+    print(f"Generated {len(raw_chunks_with_metadata)} chunks for the {report_type.upper()} report. Generating embeddings and upserting to Pinecone...")
+    
+    # Generate a unique namespace ID for this report session
+    report_namespace = f"report-{uuid.uuid4()}"
+    print(f"Using temporary Pinecone namespace: {report_namespace}")
+
+    vectors_to_upsert = []
+    # For batching if many chunks:
+    batch_size = 100 
+
+    for i, chunk_data in enumerate(raw_chunks_with_metadata):
+        chunk_text = chunk_data["text"]
+        # Generate embedding (removed .tolist() as convert_to_numpy=False returns list)
+        chunk_embedding = embedding_model.encode(chunk_text, convert_to_numpy=False) # Fix: removed .tolist()
+        
+        # Create a unique ID for each vector within the namespace
+        vector_id = f"{chunk_data.get('id_suffix', f'chunk-{i}')}"
+        
+        vectors_to_upsert.append({
+            "id": vector_id,
+            "values": chunk_embedding,
+            "metadata": {"text": chunk_text, "report_type": report_type, "chunk_index": i}
+        })
+
+        if len(vectors_to_upsert) >= batch_size:
+            pinecone_index.upsert(vectors=vectors_to_upsert, namespace=report_namespace)
+            vectors_to_upsert = []
+    
+    # Upsert any remaining vectors
+    if vectors_to_upsert:
+        pinecone_index.upsert(vectors=vectors_to_upsert, namespace=report_namespace)
+
+    print(f"Successfully upserted {len(raw_chunks_with_metadata)} embeddings to Pinecone namespace: {report_namespace}")
+    
+    return report_namespace # Return the namespace ID for later retrieval
+
+
+def retrieve_internal_rag_context(query: str, report_namespace: str, top_k: int = 3) -> str:
+    """
+    Retrieves the most relevant text chunks from the temporary Pinecone namespace
+    for the current report, based on the user's query.
+
+    Args:
+        query (str): The user's question.
+        report_namespace (str): The unique Pinecone namespace for the current report.
+        top_k (int): The number of top relevant results to retrieve.
+
+    Returns:
+        str: Formatted relevant context from the report, or an empty string if none found.
+    """
+    if not report_namespace:
+        return "" # No report namespace provided
+
+    embedding_model = load_embedding_model()
+    pinecone_index = initialize_pinecone_index()
+
+    try:
+        query_embedding = embedding_model.encode(query).tolist() # query_embedding should still be a list
+
+        # Query the specific report namespace
+        response = pinecone_index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True,
+            namespace=report_namespace # Query the specific report namespace
+        )
+
+        context_parts = []
+        for match in response.matches:
+            # You can set a minimum similarity threshold if desired
+            # if match["similarity"] > 0.5: # Example threshold
+            metadata = match.metadata
+            if metadata and "text" in metadata:
+                context_parts.append(metadata["text"])
+        
+        if context_parts:
+            return "\n\nRelevant Information from Current Report:\n" + "\n---\n".join(context_parts)
+        else:
+            return "" # No relevant context found
+
+    except Exception as e:
+        print(f"Error during internal RAG context retrieval: {e}")
+        return f"Error retrieving report context: {e}"
+
+def delete_report_namespace(report_namespace: str):
+    """
+    Deletes a specific Pinecone namespace used for a report session.
+    Call this when a new report is loaded or the application exits.
+    """
+    if not report_namespace:
+        return
+
+    pinecone_index = initialize_pinecone_index()
+    try:
+        print(f"Deleting Pinecone namespace: {report_namespace}...")
+        pinecone_index.delete(delete_all=True, namespace=report_namespace)
+        print(f"Namespace '{report_namespace}' deleted successfully.")
+    except Exception as e:
+        print(f"Error deleting Pinecone namespace '{report_namespace}': {e}")
+        # import traceback
+        # traceback.print_exc() # For debugging, if needed
+
 # Example usage (for testing chatbot_utils.py directly)
 if __name__ == "__main__":
     print("--- Testing chatbot_utils.py directly ---")
     print("Ensure PINECONE_API_KEY and PINECONE_ENVIRONMENT are set as environment variables.")
-    print(f"Attempting to load model from: {MODEL_PATH}")
-
-    # You might want to set dummy env vars for testing if not already set system-wide
-    # os.environ["PINECONE_API_KEY"] = "YOUR_API_KEY"
-    # os.environ["PINECONE_ENVIRONMENT"] = "YOUR_ENVIRONMENT"
-
+    print("Also ensure RAG_EMBEDDING_MODEL_PATH in config.py points to your fine-tuned model.")
+    
+    # --- Test General RAG Retrieval (External Knowledge) ---
     try:
-        # Test loading components
-        model = load_embedding_model()
-        index = initialize_pinecone_index()
+        model = load_embedding_model() # Ensure model is loaded for general RAG
+        # Pinecone index will be initialized if retrieve_rag_context is called
         
-        # Test retrieval
-        test_query = "What is SQL injection?"
-        print(f"\nSearching for RAG context for query: '{test_query}'")
-        retrieved_context = retrieve_rag_context(test_query)
+        test_query_external = "What is SQL injection?"
+        print(f"\nSearching for EXTERNAL RAG context for query: '{test_query_external}'")
+        retrieved_context_external = retrieve_rag_context(test_query_external)
         
-        if retrieved_context:
-            print("\nRetrieved RAG Context:")
-            print(retrieved_context)
+        if retrieved_context_external:
+            print("\nRetrieved EXTERNAL RAG Context:")
+            print(retrieved_context_external)
         else:
-            print("No RAG context retrieved.")
-
-        test_query_2 = "How to prevent XSS?"
-        print(f"\nSearching for RAG context for query: '{test_query_2}'")
-        retrieved_context_2 = retrieve_rag_context(test_query_2)
-        if retrieved_context_2:
-            print("\nRetrieved RAG Context:")
-            print(retrieved_context_2)
-        else:
-            print("No RAG context retrieved for second query.")
+            print("No EXTERNAL RAG context retrieved.")
 
     except Exception as e:
-        print(f"An error occurred during direct chatbot_utils test: {e}")
-        print("Please ensure you have a valid SentenceTransformer model at the specified MODEL_PATH,")
-        print("and that your Pinecone API Key/Environment variables are correctly configured,")
-        print("and the Pinecone index exists with data populated.")
+        print(f"An error occurred during EXTERNAL RAG test: {e}")
+        import traceback
+        traceback.print_exc()
+        print("Please ensure your external RAG setup is correct (Pinecone API, Environment, Index, and Model Path).")
+
+    print("\n" + "="*50 + "\n")
+
+    # --- Test Internal RAG Retrieval (Report-Specific Knowledge in Temporary Namespace) ---
+    # Dummy Nmap parsed data for testing internal RAG
+    dummy_nmap_data = {
+        "scan_metadata": {
+            "scan_initiated_by": "User", "timestamp": "Fri Jun 18 10:00:00 2025 IST",
+            "target": "example.com (192.168.1.1)", "nmap_version": "7.92",
+            "scan_type": "Port Scan", "scan_duration": "10.5 seconds"
+        },
+        "hosts": [
+            {
+                "ip_address": "192.168.1.1", "hostname": "example.com", "status": "up", "latency": "0.002s",
+                "os_detection": {"os_guesses": ["Linux 3.10 - 4.11"], "device_type": ["general purpose"]},
+                "ports": [
+                    {"port_id": 22, "protocol": "tcp", "state": "open", "service": "ssh",
+                     "version": "OpenSSH 7.6p1 Ubuntu 4ubuntu0.3 (Ubuntu Linux; protocol 2.0)",
+                     "script_outputs": {"ssh-hostkey": "2048 SHA256:abcd... (RSA). Weak algorithms detected."}
+                    },
+                    {"port_id": 80, "protocol": "tcp", "state": "open", "service": "http",
+                     "version": "Apache httpd 2.4.29 ((Ubuntu))",
+                     "script_outputs": {"http-title": "Apache2 Ubuntu Default Page", "http-security-headers": "Missing X-Frame-Options"}
+                    }
+                ]
+            }
+        ]
+    }
+
+    # Dummy ZAP parsed data for testing internal RAG
+    dummy_zap_data = {
+        "scan_metadata": {
+            "tool": "Checkmarx ZAP Report", "report_id": "12345-abcde", "generated_at": "2025-06-18T10:05:00",
+            "site": "http://testphp.vulnweb.com", "zap_version": "2.10.0"
+        },
+        "summary": {
+            "risk_counts": {"High": 1, "Medium": 2, "Low": 3, "Informational": 5, "False Positives": 0},
+            "total_alerts": 11
+        },
+        "vulnerabilities": [
+            {
+                "name": "SQL Injection", "risk": "High",
+                "description": "SQL Injection vulnerability found in parameter 'id' on products page. Highly critical due to data exposure.",
+                "urls": [{"url": "http://testphp.vulnweb.com/listproducts.php?cat=1", "method": "GET", "parameter": "id", "attack": "id=1'%20OR%201=1--", "evidence": "Error message with SQL syntax"}],
+                "solution": "Use parameterized queries or prepared statements to prevent SQL injection. Validate and sanitize all user input."
+            },
+            {
+                "name": "Cross Site Scripting (XSS)", "risk": "Medium",
+                "description": "Reflected XSS vulnerability identified on search page. Allows attacker to inject malicious scripts.",
+                "urls": [{"url": "http://testphp.vulnweb.com/search.php?test=1", "method": "GET", "parameter": "test", "attack": "<script>alert(1)</script>", "evidence": "Reflected script in response"}],
+                "solution": "Implement proper input validation and output encoding for all user-supplied data to prevent XSS."
+            }
+        ]
+    }
+
+    report_namespace_nmap = None
+    report_namespace_zap = None
+
+    try:
+        # Load and upsert Nmap chunks
+        print("\nLoading and upserting Nmap chunks to temporary namespace...")
+        report_namespace_nmap = load_report_chunks_and_embeddings(dummy_nmap_data, "nmap")
+        print(f"Nmap chunks upserted to namespace: {report_namespace_nmap}")
+
+        # Test internal RAG with Nmap data
+        if report_namespace_nmap:
+            test_query_internal_nmap = "Tell me about the SSH service on 192.168.1.1."
+            print(f"\nSearching for INTERNAL RAG context for query: '{test_query_internal_nmap}' (Nmap)")
+            retrieved_context_internal_nmap = retrieve_internal_rag_context(test_query_internal_nmap, report_namespace_nmap, top_k=2)
+            if retrieved_context_internal_nmap:
+                print("\nRetrieved INTERNAL RAG Context (Nmap):")
+                print(retrieved_context_internal_nmap)
+            else:
+                print("No INTERNAL RAG context retrieved for Nmap query.")
+
+        # Load and upsert ZAP chunks
+        print("\nLoading and upserting ZAP chunks to temporary namespace...")
+        report_namespace_zap = load_report_chunks_and_embeddings(dummy_zap_data, "zap")
+        print(f"ZAP chunks upserted to namespace: {report_namespace_zap}")
+
+        # Test internal RAG with ZAP data
+        if report_namespace_zap:
+            test_query_internal_zap = "Details about the SQL Injection vulnerability."
+            print(f"\nSearching for INTERNAL RAG context for query: '{test_query_internal_zap}' (ZAP)")
+            retrieved_context_internal_zap = retrieve_internal_rag_context(test_query_internal_zap, report_namespace_zap, top_k=2)
+            if retrieved_context_internal_zap:
+                print("\nRetrieved INTERNAL RAG Context (ZAP):")
+                print(retrieved_context_internal_zap)
+            else:
+                print("No INTERNAL RAG context retrieved for ZAP query.")
+
+    except Exception as e:
+        print(f"An error occurred during INTERNAL RAG test: {e}")
+        import traceback
+        traceback.print_exc()
+        print("Please ensure your SentenceTransformer model is valid and Pinecone is accessible.")
+    finally:
+        # Clean up temporary namespaces after testing
+        if report_namespace_nmap:
+            delete_report_namespace(report_namespace_nmap)
+        if report_namespace_zap:
+            delete_report_namespace(report_namespace_zap)

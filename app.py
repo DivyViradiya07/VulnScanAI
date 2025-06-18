@@ -24,27 +24,38 @@ if chatbot_modules_path not in sys.path:
 
 # Import core modules from chatbot_modules
 try:
+    # Import configuration settings
+    from chatbot_modules import config # Import the config module
+
     from local_llm import load_model, generate_response
     from nmap_parser import process_nmap_report_file
     from zap_parser import process_zap_report_file
     from summarizer import summarize_report_with_llm
     from pdf_extractor import extract_text_from_pdf
     # Import RAG utilities
-    from utils import load_embedding_model, initialize_pinecone_index, retrieve_rag_context
+    from utils import (
+        load_embedding_model, 
+        initialize_pinecone_index, 
+        retrieve_rag_context, 
+        load_report_chunks_and_embeddings, # New import for internal RAG
+        retrieve_internal_rag_context, # New import for internal RAG
+        delete_report_namespace # New import for cleanup
+    )
 except ImportError as e:
     print(f"Error importing a module: {e}")
-    print("Please ensure all modules (local_llm.py, nmap_parser.py, zap_parser.py, pdf_extractor.py, summarizer.py, chatbot_utils.py) are located within the 'chatbot_modules' directory and correctly configured in your Python path.")
+    print("Please ensure all modules (local_llm.py, nmap_parser.py, zap_parser.py, pdf_extractor.py, summarizer.py, chatbot_utils.py, config.py) are located within the 'chatbot_modules' directory and correctly configured in your Python path.")
     sys.exit(1)
 
-# --- Configuration for Local LLM ---
-MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
-MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
-MODEL_DIR = os.path.join(current_dir, "pretrained_language_model")
+# --- Configuration for Local LLM (now from config.py) ---
+MODEL_ID = config.LLM_MODEL_ID
+MODEL_BASENAME = config.LLM_MODEL_BASENAME
+MODEL_DIR = config.LLM_MODEL_DIR # This path is built in config.py based on PROJECT_ROOT
 
 # --- Global Variables for Chatbot State ---
 llm_model = None
 current_parsed_report: Optional[Dict[str, Any]] = None
 current_report_type: Optional[str] = None
+current_report_namespace: Optional[str] = None # New global variable for report's Pinecone namespace
 chat_history: List[Dict[str, str]] = []
 
 # Global variables for RAG components
@@ -88,9 +99,14 @@ def load_rag_components_once():
 
 def reset_chat_context():
     """Resets the parsed report and chat history for a new report."""
-    global current_parsed_report, current_report_type, chat_history
+    global current_parsed_report, current_report_type, current_report_namespace, chat_history
+    # Delete the old report's namespace if it exists
+    if current_report_namespace:
+        delete_report_namespace(current_report_namespace)
+    
     current_parsed_report = None
     current_report_type = None
+    current_report_namespace = None # Reset the namespace
     chat_history = [] # Clear history for new report
 
 def detect_report_type(pdf_path: str) -> Optional[str]:
@@ -131,14 +147,8 @@ def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> b
 
     question_lower = question.lower()
 
-    report_keywords = [
-        "report", "scan", "host", "ip", "port", "vulnerability", "alert", "cve",
-        "solution", "remediation", "finding", "risk", "instance", "site", "version",
-        "mac address", "os detection", "service", "script", "traceroute"
-    ]
-
-    # Check for presence of general report-related keywords
-    if any(keyword in question_lower for keyword in report_keywords):
+    # Use keywords from config.py
+    if any(keyword in question_lower for keyword in config.REPORT_SPECIFIC_KEYWORDS):
         return True
 
     # More specific checks using data from the loaded report
@@ -195,7 +205,7 @@ def main_cli_loop():
             if report_path.lower() in ['exit', 'quit']:
                 break
             if report_path.lower() == 'new_report':
-                reset_chat_context()
+                reset_chat_context() # This now handles namespace deletion
                 continue
 
             if not os.path.exists(report_path):
@@ -225,15 +235,28 @@ def main_cli_loop():
                     parsed_data = process_zap_report_file(report_path)
                 
                 if parsed_data:
-                    global current_parsed_report, current_report_type
+                    global current_parsed_report, current_report_type, current_report_namespace
                     current_parsed_report = parsed_data
                     current_report_type = report_type.lower()
                     print(f"Successfully parsed {report_type.upper()} report.")
+
+                    # --- Load report chunks and upsert to temporary Pinecone namespace ---
+                    if _embedding_model_instance and _pinecone_index_instance:
+                        print("\n--- Loading report data into temporary Pinecone namespace... ---")
+                        current_report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type)
+                        if current_report_namespace:
+                            print(f"Report data loaded into namespace: {current_report_namespace}")
+                        else:
+                            print("Failed to load report data into Pinecone namespace.")
+                            # Optionally, continue without internal RAG or exit
+                    else:
+                        print("RAG components (embedding model or Pinecone) not available. Cannot load report data into Pinecone.")
+
                 else:
                     print(f"Failed to parse {report_type.upper()} report. No data returned.")
                     continue
             except Exception as e:
-                print(f"An error occurred during parsing: {e}")
+                print(f"An error occurred during parsing or loading into Pinecone: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
@@ -259,7 +282,7 @@ def main_cli_loop():
                     print("Exiting chat. Goodbye!")
                     return
                 if user_question.lower() == 'new_report':
-                    reset_chat_context()
+                    reset_chat_context() # This now handles namespace deletion
                     break
 
                 chat_history.append({"role": "user", "content": user_question})
@@ -270,22 +293,35 @@ def main_cli_loop():
 
                 # Determine question type and prepare context
                 if current_parsed_report and is_report_specific_question(user_question, current_parsed_report):
-                    print(" (Determined as report-specific question)")
+                    print(" (Determined as report-specific question - attempting INTERNAL RAG)")
+                    if current_report_namespace and _embedding_model_instance and _pinecone_index_instance:
+                        # Use internal RAG for report-specific questions
+                        rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+                        if rag_context:
+                            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
+                        else:
+                            llm_prompt_content += "No specific relevant information found in the current report for this query. "
+                            print(" (No INTERNAL RAG context found for report-specific question)")
+                    else:
+                        llm_prompt_content += "Internal RAG components not available or report not loaded into Pinecone. Answering based on initial summary and general knowledge.\n"
+                        print(" (Internal RAG not available for report-specific question)")
+                    
+                    # Also include a general instruction to the LLM to emphasize it's about the report
                     llm_prompt_content += f"The user is asking a question related to the previously provided {current_report_type.upper()} security report."
                     llm_prompt_content += " Please refer to the report's content and your previous summary to answer.\n"
                 else:
-                    # General cybersecurity question (or no report loaded) -> Use RAG
-                    print(" (Determined as general cybersecurity question - attempting RAG)")
+                    # General cybersecurity question (or no report loaded) -> Use EXTERNAL RAG
+                    print(" (Determined as general cybersecurity question - attempting EXTERNAL RAG)")
                     if _embedding_model_instance and _pinecone_index_instance:
-                        rag_context = retrieve_rag_context(user_question)
+                        rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") # Explicitly use external namespace
                         if rag_context:
                             llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
                         else:
                             llm_prompt_content += "No specific relevant information found in the knowledge base for this query. "
-                            print(" (No relevant RAG context found)")
+                            print(" (No EXTERNAL RAG context found)")
                     else:
                         llm_prompt_content += "RAG components not loaded or initialized. Answering based on general knowledge and chat history.\n"
-                        print(" (RAG components not available)")
+                        print(" (RAG components not available for general question)")
 
                 # Combine chat history with new context/instruction for the LLM
                 concatenated_prompt = ""
@@ -298,7 +334,7 @@ def main_cli_loop():
                 final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
 
                 try:
-                    llm_response = generate_response(llm_instance, final_llm_prompt, max_tokens=500)
+                    llm_response = generate_response(llm_instance, final_llm_prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
                     
                     print(f"\nBot: {llm_response}")
                     chat_history.append({"role": "assistant", "content": llm_response})
@@ -310,16 +346,36 @@ def main_cli_loop():
                     if chat_history and chat_history[-1]["role"] == "user":
                         chat_history.pop()
 
-    finally: # Ensure LLM model is explicitly closed
-        if llm_model:
-            try:
+    finally: # Ensure LLM model and Pinecone namespace are explicitly closed/deleted
+        try:
+            # Clean up the current report's namespace on exit if it was created
+            if current_report_namespace:
+                delete_report_namespace(current_report_namespace)
+            
+            # Clean up LLM model if it exists
+            if 'llm_model' in globals() and llm_model is not None:
                 print("\n--- Closing LLM model ---")
-                if hasattr(llm_model, 'close') and callable(llm_model.close):
-                    llm_model.close()
-                print("LLM model closed successfully.")
-            except Exception as e:
-                print(f"Error during explicit LLM model closing: {e}")
-                traceback.print_exc()
+                try:
+                    # Try to close the model if it has a close method
+                    if hasattr(llm_model, 'close') and callable(llm_model.close):
+                        # Check if the model has the necessary attributes before calling close
+                        if hasattr(llm_model, '_model') and llm_model._model is not None:
+                            llm_model.close()
+                            print("LLM model closed successfully.")
+                        else:
+                            print("LLM model already closed or invalid.")
+                    else:
+                        print("LLM model does not have a close method.")
+                except Exception as e:
+                    print(f"Error during explicit LLM model closing: {e}")
+                    import traceback
+                    traceback.print_exc()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            import traceback
+            traceback.print_exc()
+
 
 if __name__ == "__main__":
     main_cli_loop()
+
