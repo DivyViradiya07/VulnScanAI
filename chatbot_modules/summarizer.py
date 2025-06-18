@@ -1,9 +1,23 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
+import os
+import sys
+import dotenv
+import uuid
+
+# Load environment variables from a .env file (if present)
+dotenv.load_dotenv()
+
+# Add the project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # Assuming local_llm.py is in the same directory or accessible via PYTHONPATH
-# from local_llm import Llama, generate_response # You'll need Llama class for type hinting
 from local_llm import generate_response, load_model # Import generate_response and load_model directly
+# Also import config for default max tokens for summarization
+from chatbot_modules import config 
+
 
 class Llama:
     """
@@ -165,14 +179,57 @@ def summarize_report_with_llm(
     else:
         return "Error: Unsupported report type for summarization. Please specify 'nmap' or 'zap'."
 
-    print(f"\n--- Sending formatted prompt to LLM for {report_type} report ---")
-    # print(prompt[:1000]) # Print first 1000 chars of prompt for debugging
+    print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
 
     try:
-        llm_response = generate_response(llm_instance, prompt)
+        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS) # Use config for max_tokens
         return llm_response
     except Exception as e:
         return f"Error generating LLM response: {e}"
+
+
+def summarize_chat_history_segment(
+    llm_instance: Any, history_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
+) -> str:
+    """
+    Uses the LLM to summarize a segment of the chat history.
+
+    Args:
+        llm_instance (Any): The loaded Llama model instance.
+        history_segment (List[Dict[str, str]]): A list of message dictionaries
+                                                 (e.g., [{'role': 'user', 'content': '...'}, ...]).
+        max_tokens (int): Maximum tokens for the summary.
+
+    Returns:
+        str: A concise summary of the conversation segment.
+    """
+    if not history_segment:
+        return ""
+
+    # Construct the prompt for summarization
+    summarization_prompt = (
+        "Please summarize the following conversation history concisely. "
+        "Focus on the main topics discussed and any key questions or conclusions.\n\n"
+        "--- Conversation History to Summarize ---\n"
+    )
+    
+    # Concatenate the history segment into a string for the LLM
+    for msg in history_segment:
+        summarization_prompt += f"{msg['role'].capitalize()}: {msg['content']}\n"
+    
+    summarization_prompt += "--- End Conversation History ---\n\nSummary:"
+
+    print(f"\n--- Sending chat history segment to LLM for summarization (length: {len(summarization_prompt)} chars) ---")
+
+    try:
+        # Call generate_response with the summarization prompt
+        # We enforce a smaller max_tokens for summarization to keep it concise
+        summary_response = generate_response(llm_instance, summarization_prompt, max_tokens=max_tokens)
+        return summary_response.strip()
+    except Exception as e:
+        print(f"Error generating history summary: {e}")
+        return "(Error summarizing previous conversation. Some context may be lost.)"
+
 
 # Example usage (for testing summarizer.py directly if needed)
 if __name__ == "__main__":
@@ -180,25 +237,29 @@ if __name__ == "__main__":
     # This requires a dummy local_llm and parsed data.
     # In a real run, main.py will handle loading and parsing.
 
-    # Dummy LLM instance (replace with actual load_model in main.py)
-    # For standalone testing, you might need to mock or actually load the model here.
-    # from local_llm import load_model, generate_response
-    # MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
-    # MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
-    # MODEL_DIR = "pretrained_language_model" # Or a suitable path
-    # print("Loading dummy LLM (please ensure 'local_llm.py' is configured to load a real model)...")
-    # try:
-    #     dummy_llm_instance = load_model(MODEL_ID, MODEL_BASENAME, MODEL_DIR)
-    #     print("Dummy LLM loaded.")
-    # except Exception as e:
-    #     print(f"Could not load LLM for direct summarizer test: {e}. Please ensure model path and settings are correct.")
-    #     dummy_llm_instance = None # Set to None if loading fails
-
     # Mock LLM instance for local testing without actual model download/load
     class MockLlama:
         def create_chat_completion(self, messages, max_tokens, temperature, stop):
-            print(f"Mock LLM received prompt: {messages[0]['content'][:200]}...")
-            return {"choices": [{"message": {"content": "This is a mock LLM summary and remediation plan."}}]}
+            # For simplicity, mock the chat completion response
+            full_prompt = messages[0]['content'] if messages else ""
+            if "summarize the following conversation history" in full_prompt.lower():
+                return {"choices": [{"message": {"content": "Mocked summary of the conversation history."}}]}
+            elif "Nmap Report Data" in full_prompt:
+                 return {"choices": [{"message": {"content": "Mocked Nmap report summary."}}]}
+            elif "ZAP Report Data" in full_prompt:
+                 return {"choices": [{"message": {"content": "Mocked ZAP report summary."}}]}
+            else:
+                return {"choices": [{"message": {"content": "Mocked LLM response."}}]}
+
+    # Override generate_response for this test block
+    _original_generate_response = generate_response
+    def generate_response(llm_instance, prompt, max_tokens=256, temperature=0.7, stop=["</s>"]):
+        return llm_instance.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop
+        )["choices"][0]["message"]["content"]
 
     dummy_llm_instance = MockLlama()
     print("Using Mock LLM for summarizer test.")
@@ -283,6 +344,30 @@ if __name__ == "__main__":
         zap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_zap_data, "zap")
         print("Generated ZAP Summary:")
         print(zap_summary)
+        
+        # Test summarize_chat_history_segment
+        print("\n--- Testing chat history summarization ---")
+        test_history_segment = [
+            {"role": "user", "content": "What is SQL injection?"},
+            {"role": "assistant", "content": "SQL injection is a web security vulnerability that allows an attacker to alter the SQL queries made by an application."},
+            {"role": "user", "content": "How do I prevent it?"},
+            {"role": "assistant", "content": "You can prevent SQL injection by using parameterized queries, prepared statements, and input validation."}
+        ]
+        
+        # Temporarily set a dummy config for this test if not importing real config
+        class DummyConfig:
+            DEFAULT_SUMMARIZE_MAX_TOKENS = 150
+        
+        # Use the actual config if available, otherwise use dummy
+        current_config = config if 'config' in locals() else DummyConfig()
+        
+        history_summary = summarize_chat_history_segment(dummy_llm_instance, test_history_segment, max_tokens=current_config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+        print("Generated History Summary:")
+        print(history_summary)
+
     else:
         print("Skipping summarizer tests as LLM instance could not be loaded.")
+    
+    # Restore original generate_response after testing
+    generate_response = _original_generate_response
 
