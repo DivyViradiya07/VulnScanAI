@@ -2,6 +2,7 @@ import os
 import sys
 import json
 from typing import Dict, Any, List, Optional
+import atexit
 
 # --- Import RAG components for type hinting ---
 try:
@@ -30,6 +31,7 @@ try:
     from local_llm import load_model, generate_response
     from nmap_parser import process_nmap_report_file
     from zap_parser import process_zap_report_file
+    from ssl_parser import process_sslscan_report_file # New import for SSLScan parser
     from summarizer import summarize_report_with_llm, summarize_chat_history_segment
     from pdf_extractor import extract_text_from_pdf
     # Import RAG utilities
@@ -43,7 +45,7 @@ try:
     )
 except ImportError as e:
     print(f"Error importing a module: {e}")
-    print("Please ensure all modules (local_llm.py, nmap_parser.py, zap_parser.py, pdf_extractor.py, summarizer.py, chatbot_utils.py, config.py) are located within the 'chatbot_modules' directory and correctly configured in your Python path.")
+    print("Please ensure all modules (local_llm.py, nmap_parser.py, zap_parser.py, sslscan_parser.py, pdf_extractor.py, summarizer.py, chatbot_utils.py, config.py) are located within the 'chatbot_modules' directory and correctly configured in your Python path.")
     sys.exit(1)
 
 # --- Configuration for Local LLM (now from config.py) ---
@@ -52,7 +54,7 @@ MODEL_BASENAME = config.LLM_MODEL_BASENAME
 MODEL_DIR = config.LLM_MODEL_DIR 
 
 # --- Global Variables for Chatbot State (Initialized once) ---
-llm_model = None
+llm_instance = None
 current_parsed_report: Optional[Dict[str, Any]] = None
 current_report_type: Optional[str] = None
 current_report_namespace: Optional[str] = None 
@@ -65,17 +67,34 @@ _pinecone_index_instance: Optional[Index] = None
 
 def load_llm_model_once():
     """Loads the LLM model only if it hasn't been loaded yet."""
-    global llm_model
-    if llm_model is None:
-        print(f"\n--- Loading LLM model from {MODEL_DIR} ---")
+    global llm_instance
+    if llm_instance is None:
         try:
-            llm_model = load_model(MODEL_ID, MODEL_BASENAME, MODEL_DIR)
-            print("LLM model loaded successfully.")
+            from local_llm import load_model
+            llm_instance = load_model(
+                model_id=config.LLM_MODEL_ID,
+                model_basename=config.LLM_MODEL_BASENAME,
+                local_dir=config.LLM_MODEL_DIR
+            )
+            # Register cleanup function
+            atexit.register(cleanup_llm)
         except Exception as e:
-            print(f"Failed to load LLM model: {e}")
-            print("Please check your local_llm.py configuration, model ID, basename, and local directory.")
+            print(f"Error loading language model: {e}")
             sys.exit(1)
-    return llm_model
+    return llm_instance
+
+def cleanup_llm():
+    """Clean up the LLM instance on program exit."""
+    global llm_instance
+    if llm_instance is not None:
+        try:
+            # Properly clean up the model instance
+            if hasattr(llm_instance, 'close'):
+                llm_instance.close()
+            llm_instance = None
+        except Exception as e:
+            # Ignore errors during cleanup
+            pass
 
 def load_rag_components_once():
     """Loads the SentenceTransformer model and initializes Pinecone index only if not loaded yet."""
@@ -109,14 +128,14 @@ def reset_chat_context():
 
 def detect_report_type(pdf_path: str) -> Optional[str]:
     """
-    Attempts to detect the type of the security report (Nmap or ZAP)
+    Attempts to detect the type of the security report (Nmap, ZAP, or SSLScan)
     by reading a small portion of its text and looking for keywords.
 
     Args:
         pdf_path (str): The path to the PDF file.
 
     Returns:
-        Optional[str]: "nmap", "zap", or None if detection fails.
+        Optional[str]: "nmap", "zap", "sslscan", or None if detection fails.
     """
     try:
         raw_text = extract_text_from_pdf(pdf_path)
@@ -129,6 +148,11 @@ def detect_report_type(pdf_path: str) -> Optional[str]:
         zap_keywords = ["checkmarx zap report", "zap version:", "alert detail", "summary of alerts", "risk level", "cwe id"]
         if any(keyword in lower_text for keyword in zap_keywords):
             return "zap"
+        
+        # New keywords for SSLScan
+        sslscan_keywords = ["ssl/tls vulnerability scan report", "ssl/tls protocols:", "supported server cipher(s):", "ssl certificate:"]
+        if any(keyword in lower_text for keyword in sslscan_keywords):
+            return "sslscan"
 
         return None
     except Exception as e:
@@ -137,7 +161,7 @@ def detect_report_type(pdf_path: str) -> Optional[str]:
 
 def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> bool:
     """
-    Heuristically determines if a question is specific to the loaded Nmap/ZAP report.
+    Heuristically determines if a question is specific to the loaded Nmap/ZAP/SSLScan report.
     This check is performed only if a report is currently loaded.
     """
     if not report_data:
@@ -150,10 +174,9 @@ def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> b
         return True
 
     # More specific checks using data from the loaded report
-    report_type = report_data.get("scan_metadata", {}).get("scan_type") if "scan_metadata" in report_data else None
-    tool_type = report_data.get("scan_metadata", {}).get("tool") if "scan_metadata" in report_data else None
+    report_tool = report_data.get("scan_metadata", {}).get("tool", "").lower()
 
-    if report_type and ("nmap" in report_type.lower() or "nmap" in tool_type.lower() if tool_type else False): # Nmap specific checks
+    if "nmap" in report_tool:
         for host in report_data.get("hosts", []):
             if host.get("ip_address") and host["ip_address"].lower() in question_lower:
                 return True
@@ -165,7 +188,7 @@ def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> b
                 if port.get("service") and port["service"].lower() in question_lower:
                     return True
 
-    elif tool_type and "zap" in tool_type.lower(): # ZAP specific checks
+    elif "zap" in report_tool:
         for vuln in report_data.get("vulnerabilities", []):
             if vuln.get("name") and vuln["name"].lower() in question_lower:
                 return True
@@ -182,6 +205,29 @@ def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> b
                        url_detail["url"].split('//')[-1].split('/')[0].lower() in question_lower:
                         return True
     
+    # New checks for SSLScan
+    elif "sslscan" in report_tool:
+        ssl_metadata = report_data.get("scan_metadata", {})
+        if ssl_metadata.get("target_host") and ssl_metadata["target_host"].lower() in question_lower:
+            return True
+        if ssl_metadata.get("connected_ip") and ssl_metadata["connected_ip"].lower() in question_lower:
+            return True
+        if ssl_metadata.get("sni_name") and ssl_metadata["sni_name"].lower() in question_lower:
+            return True
+        
+        # Check for protocols, ciphers, certificate details
+        if any(p.get("name", "").lower() in question_lower for p in report_data.get("protocols", [])):
+            return True
+        if any(c.get("name", "").lower() in question_lower for c in report_data.get("supported_ciphers", [])):
+            return True
+        if report_data.get("ssl_certificate", {}).get("subject", "").lower() in question_lower:
+            return True
+        if report_data.get("ssl_certificate", {}).get("issuer", "").lower() in question_lower:
+            return True
+        if "tls" in question_lower or "ssl" in question_lower or "cipher" in question_lower or "certificate" in question_lower:
+            return True
+
+
     return False
 
 
@@ -191,7 +237,7 @@ def main_cli_loop():
     Handles file upload, parsing, initial summary, and interactive chat.
     """
     # Declare global variables that will be reassigned within this function
-    global chat_history # Moved this declaration to the top of the function
+    global chat_history 
     
     print("--- Welcome to the Security Report Chatbot (CLI Version) ---")
     print("Enter 'exit' or 'quit' at any time to end the session.")
@@ -202,7 +248,7 @@ def main_cli_loop():
 
     try: # Start of try block for controlled LLM shutdown
         while True:
-            report_path = input("\nPlease enter the path to your Nmap or ZAP PDF report: ").strip()
+            report_path = input("\nPlease enter the path to your Nmap, ZAP, or SSLScan PDF report: ").strip()
             if report_path.lower() in ['exit', 'quit']:
                 break
             if report_path.lower() == 'new_report':
@@ -221,7 +267,7 @@ def main_cli_loop():
             report_type = detect_report_type(report_path)
 
             if report_type is None:
-                print("Could not automatically detect report type. Please ensure it's a valid Nmap or ZAP PDF report.")
+                print("Could not automatically detect report type. Please ensure it's a valid Nmap, ZAP, or SSLScan PDF report.")
                 continue # Ask for a new report path
             
             print(f"Detected report type: {report_type.upper()}")
@@ -234,6 +280,8 @@ def main_cli_loop():
                     parsed_data = process_nmap_report_file(report_path)
                 elif report_type.lower() == 'zap':
                     parsed_data = process_zap_report_file(report_path)
+                elif report_type.lower() == 'sslscan': # New call for SSLScan parser
+                    parsed_data = process_sslscan_report_file(report_path)
                 
                 if parsed_data:
                     global current_parsed_report, current_report_type, current_report_namespace
@@ -242,8 +290,12 @@ def main_cli_loop():
                     print(f"Successfully parsed {report_type.upper()} report.")
 
                     # --- Load report chunks and upsert to temporary Pinecone namespace ---
+                    # The current_report_namespace is now managed as an in-memory list in utils.py
+                    # load_report_chunks_and_embeddings now returns the list of chunks with embeddings
                     if _embedding_model_instance and _pinecone_index_instance:
                         print("\n--- Loading report data into temporary Pinecone namespace... ---")
+                        # The return type of load_report_chunks_and_embeddings changed
+                        # We still need a namespace to query within Pinecone, so let's stick to the current design
                         current_report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type)
                         if current_report_namespace:
                             print(f"Report data loaded into namespace: {current_report_namespace}")
@@ -308,7 +360,6 @@ def main_cli_loop():
                         new_chat_history.extend(chat_history[len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD:])
                         
                         # Update the global chat_history
-                        # Removed 'global chat_history' here as it's already at the top of the function.
                         chat_history = new_chat_history
                         print("--- Chat history summarized. ---")
                     else:
@@ -379,12 +430,12 @@ def main_cli_loop():
             if current_report_namespace:
                 delete_report_namespace(current_report_namespace)
             
-            if 'llm_model' in globals() and llm_model is not None:
+            if 'llm_instance' in globals() and llm_instance is not None:
                 print("\n--- Closing LLM model ---")
                 try:
-                    if hasattr(llm_model, 'close') and callable(llm_model.close):
-                        if hasattr(llm_model, '_model') and llm_model._model is not None:
-                            llm_model.close()
+                    if hasattr(llm_instance, 'close') and callable(llm_instance.close):
+                        if hasattr(llm_instance, '_model') and llm_instance._model is not None:
+                            llm_instance.close()
                             print("LLM model closed successfully.")
                         else:
                             print("LLM model already closed or invalid.")
@@ -403,6 +454,9 @@ def main_cli_loop():
 if __name__ == "__main__":
     try:
         main_cli_loop()
+    except KeyboardInterrupt:
+        print("\nExiting...")
     finally:
-        import time
-        time.sleep(1)
+        # Ensure cleanup happens even if there's an error
+        cleanup_llm()
+        sys.exit(0)

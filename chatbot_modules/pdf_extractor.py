@@ -50,8 +50,7 @@ if __name__ == "__main__":
     # 2. Place a sample PDF (e.g., a simple text document saved as PDF) inside it.
     # 3. Update the pdf_test_path below.
 
-    dummy_pdf_path = r"D:\VulnScanAI_Chatbot\documents\Zap\1_zap_20250419_125059.pdf" # Make sure this path is correct for your test file
-
+    dummy_pdf_path = r"D:\VulnScanAI_Chatbot\documents\MobSf\1_mobsf_bitbar-sample-app_20250419_123624.pdf"
     # To create a dummy PDF for quick testing, you can use online converters
     # or simple text editors to save as PDF.
     # If you don't have a PDF, this part will raise FileNotFoundError as expected.

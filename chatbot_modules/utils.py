@@ -248,6 +248,86 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]: # Ch
             })
     return chunks
 
+def _chunk_sslscan_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extracts meaningful text chunks from parsed SSLScan report data.
+    Each chunk represents a specific finding or detail from the report,
+    along with metadata.
+    """
+    chunks = []
+    metadata = parsed_data.get("scan_metadata", {})
+    
+    # Chunk 1: Overall summary
+    chunks.append({
+        "text": (f"SSLScan Summary: Target host {metadata.get('target_host', 'N/A')}, "
+                 f"Connected IP {metadata.get('connected_ip', 'N/A')}. "
+                 f"Scan performed at {metadata.get('timestamp', 'N/A')} "
+                 f"with tool version {metadata.get('tool_version', 'N/A')} and OpenSSL {metadata.get('openssl_version', 'N/A')}."
+                 ),
+        "id_suffix": "sslscan_summary"
+    })
+
+    # Chunk 2: Protocols status
+    protocols_text = "SSL/TLS Protocols: " + ", ".join([f"{p.get('name', 'N/A')} {p.get('status', 'N/A')}" for p in parsed_data.get('protocols', [])])
+    chunks.append({
+        "text": protocols_text,
+        "id_suffix": "sslscan_protocols"
+    })
+
+    # Chunk 3: Security features
+    security_features_text = "TLS Security Features: "
+    features = []
+    for feature, status in parsed_data.get('security_features', {}).items():
+        if isinstance(status, list):
+            features.append(f"{feature.replace('_', ' ').title()}: {', '.join(status)}")
+        else:
+            features.append(f"{feature.replace('_', ' ').title()}: {status}")
+    security_features_text += ", ".join(features)
+    chunks.append({
+        "text": security_features_text,
+        "id_suffix": "sslscan_security_features"
+    })
+
+    # Chunk 4: Supported Ciphers
+    if parsed_data.get('supported_ciphers'):
+        ciphers_text = "Supported Server Ciphers: " + "; ".join([
+            f"{c.get('status', 'N/A')} {c.get('name', 'N/A')} ({c.get('bits', 'N/A')} bits, TLS {c.get('tls_version', 'N/A')})"
+            for c in parsed_data['supported_ciphers']
+        ])
+        chunks.append({
+            "text": ciphers_text,
+            "id_suffix": "sslscan_ciphers"
+        })
+
+    # Chunk 5: Key Exchange Groups
+    if parsed_data.get('key_exchange_groups'):
+        kex_groups_text = "Server Key Exchange Groups: " + "; ".join([
+            f"{g.get('name', 'N/A')} ({g.get('details', 'N/A')}, {g.get('bits', 'N/A')} bits, TLS {g.get('tls_version', 'N/A')})"
+            for g in parsed_data['key_exchange_groups']
+        ])
+        chunks.append({
+            "text": kex_groups_text,
+            "id_suffix": "sslscan_kex_groups"
+        })
+
+    # Chunk 6: SSL Certificate Details
+    certificate = parsed_data.get('ssl_certificate', {})
+    if certificate:
+        cert_details_text = (
+            f"SSL Certificate: Subject '{certificate.get('subject', 'N/A')}', "
+            f"Issuer '{certificate.get('issuer', 'N/A')}', "
+            f"Signature Algorithm '{certificate.get('signature_algorithm', 'N/A')}', "
+            f"RSA Key Strength {certificate.get('rsa_key_strength', 'N/A')} bits. "
+            f"Valid from {certificate.get('not_valid_before', 'N/A')} to {certificate.get('not_valid_after', 'N/A')}. "
+            f"Altnames: {', '.join(certificate.get('altnames', ['N/A']))}."
+        )
+        chunks.append({
+            "text": cert_details_text,
+            "id_suffix": "sslscan_certificate"
+        })
+
+    return chunks
+
 
 def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report_type: str) -> str:
     """
@@ -262,6 +342,8 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_nmap_report(parsed_report_data)
     elif report_type.lower() == "zap":
         raw_chunks_with_metadata = _chunk_zap_report(parsed_report_data)
+    elif report_type.lower() == "sslscan": # New condition for SSLScan
+        raw_chunks_with_metadata = _chunk_sslscan_report(parsed_report_data)
     else:
         print(f"Warning: Unknown report type '{report_type}'. Cannot chunk report.")
         return ""
@@ -453,8 +535,56 @@ if __name__ == "__main__":
         ]
     }
 
+    # Dummy SSLScan parsed data for testing internal RAG (new)
+    dummy_sslscan_data = {
+        "scan_metadata": {
+            "tool": "SSLScan Report",
+            "initiated_by": "Maaz",
+            "timestamp": "2025-04-19 12:29:21",
+            "target_host": "hackthissite.org",
+            "tool_version": "2.1.5",
+            "openssl_version": "3.4.0",
+            "connected_ip": "137.74.187.102",
+            "tested_server": "hackthissite.org",
+            "tested_port": 443,
+            "sni_name": "hackthissite.org"
+        },
+        "protocols": [
+            {"name": "SSLv2", "status": "disabled"},
+            {"name": "SSLv3", "status": "disabled"},
+            {"name": "TLSv1.0", "status": "disabled"},
+            {"name": "TLSv1.1", "status": "disabled"},
+            {"name": "TLSv1.2", "status": "enabled"},
+            {"name": "TLSv1.3", "status": "disabled"}
+        ],
+        "security_features": {
+            "tls_fallback_scsv": "Server supports TLS Fallback SCSV",
+            "tls_renegotiation": "Session renegotiation not supported",
+            "tls_compression": "Compression disabled",
+            "heartbleed": ["TLSv1.2 not vulnerable to heartbleed"]
+        },
+        "supported_ciphers": [
+            {"status": "Preferred", "tls_version": "TLSv1.2", "bits": 256, "name": "ECDHE-RSA-AES256-GCM-SHA384", "curve": "P-256", "dhe_bits": 256},
+            {"status": "Accepted", "tls_version": "TLSv1.2", "bits": 128, "name": "ECDHE-RSA-AES128-GCM-SHA256", "curve": "P-256", "dhe_bits": 256}
+        ],
+        "key_exchange_groups": [
+            {"tls_version": "TLSv1.2", "bits": 128, "name": "secp256r1", "details": "NIST P-256"}
+        ],
+        "ssl_certificate": {
+            "signature_algorithm": "sha256WithRSAEncryption",
+            "rsa_key_strength": 4096,
+            "subject": "hackthisjogneh42n5o7gbzrewxee3vyu6ex37ukyvdw6jm66npakiyd.onion",
+            "altnames": ["DNS: hackthissite.org", "DNS:www.hackthissite.org"],
+            "issuer": "HARICA DV TLS RSA",
+            "not_valid_before": "Mar 25 04:43:22 2025 GMT",
+            "not_valid_after": "Mar 25 04:43:22 2026 GMT"
+        }
+    }
+
+
     report_namespace_nmap = None
     report_namespace_zap = None
+    report_namespace_sslscan = None # New variable for SSLScan namespace
 
     try:
         # Load and upsert Nmap chunks
@@ -488,6 +618,23 @@ if __name__ == "__main__":
                 print(retrieved_context_internal_zap)
             else:
                 print("No INTERNAL RAG context retrieved for ZAP query.")
+        
+        # Load and upsert SSLScan chunks (new test block)
+        print("\nLoading and upserting SSLScan chunks to temporary namespace...")
+        report_namespace_sslscan = load_report_chunks_and_embeddings(dummy_sslscan_data, "sslscan")
+        print(f"SSLScan chunks upserted to namespace: {report_namespace_sslscan}")
+
+        # Test internal RAG with SSLScan data
+        if report_namespace_sslscan:
+            test_query_internal_sslscan = "What are the supported TLS protocols and ciphers?"
+            print(f"\nSearching for INTERNAL RAG context for query: '{test_query_internal_sslscan}' (SSLScan)")
+            retrieved_context_internal_sslscan = retrieve_internal_rag_context(test_query_internal_sslscan, report_namespace_sslscan, top_k=2)
+            if retrieved_context_internal_sslscan:
+                print("\nRetrieved INTERNAL RAG Context (SSLScan):")
+                print(retrieved_context_internal_sslscan)
+            else:
+                print("No INTERNAL RAG context retrieved for SSLScan query.")
+
 
     except Exception as e:
         print(f"An error occurred during INTERNAL RAG test: {e}")
@@ -500,3 +647,5 @@ if __name__ == "__main__":
             delete_report_namespace(report_namespace_nmap)
         if report_namespace_zap:
             delete_report_namespace(report_namespace_zap)
+        if report_namespace_sslscan: # New cleanup
+            delete_report_namespace(report_namespace_sslscan)

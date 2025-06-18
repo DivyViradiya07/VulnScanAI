@@ -1,0 +1,38 @@
+{
+  "scan_metadata": {
+    "tool": "MobSF Report",
+    "report_id": "23a24501-164f-446a-9607-5920103ea607",
+    "generated_at": null,
+    "app_name": "App Name:",
+    "package_name": "com.bitbar.testdroid",
+    "version": "Android Version Name:",
+    "file_name": "bitbar-sample-app.apk",
+    "file_size": "0.11MB",
+    "md5": "00cc5435151aa38a091781922c0390a4",
+    "sha1": "40e991508120d6f5d653a6755d8209df4d20289d",
+    "sha256": "3b4d462b8cce5f377a33417e1be7680717065f280a9f6e2f6af49325dbe89411"
+  },
+  "summary": {
+    "security_score": 32,
+    "risk_grade": "HIGH RISK",
+    "risk_counts": {
+      "High": 0,
+      "Medium": 0,
+      "Low": 0,
+      "Info": 0,
+      "Secure": 0
+    },
+    "total_issues": 0
+  },
+  "findings": [
+    {
+      "id": "manifest_2",
+      "title": "Debug Enabled For App",
+      "severity": "Medium",
+      "category": "Manifest Analysis",
+      "description": "high",
+      "location": "android:debuggable=true",
+      "details": {}
+    }
+  ]
+}

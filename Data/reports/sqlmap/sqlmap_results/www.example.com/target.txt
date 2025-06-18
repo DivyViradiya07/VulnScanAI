@@ -1,1 +1,0 @@
-https://www.example.com/index.php?id=1 (GET)  # /usr/local/bin/sqlmap -u https://www.example.com/index.php?id=1 --batch --level 1 --risk 1 --dump-all --output-dir /home/isectrain/VulnScanAI/VulnScanAI_Final_Iteration/app/reports/sqlmap/sqlmap_results --crawl=2 -v 3

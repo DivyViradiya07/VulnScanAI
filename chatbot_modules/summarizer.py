@@ -157,6 +157,93 @@ def _format_zap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     
     return prompt
 
+def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Crafts a detailed prompt for the LLM based on SSLScan parsed data.
+    Focuses on protocols, ciphers, key exchange, certificate details, and security features.
+    """
+    prompt = (
+        "As a cybersecurity analyst, analyze the following SSL/TLS Vulnerability Scan Report "
+        "and provide:\n"
+        "1. A concise summary of the scan results, including the target host and overall security posture.\n"
+        "2. Key findings regarding enabled/disabled protocols, supported ciphers, and certificate details.\n"
+        "3. Potential security implications for any identified weaknesses (e.g., outdated protocols, weak ciphers, certificate issues).\n"
+        "4. Actionable remediation steps to improve the SSL/TLS configuration.\n"
+        "The report data is in JSON format. Do not invent information not present in the report.\n\n"
+        "--- SSLScan Report Data ---\n"
+    )
+
+    # Add scan metadata
+    metadata = parsed_data.get("scan_metadata", {})
+    prompt += f"Tool: {metadata.get('tool', 'N/A')}\n"
+    prompt += f"Target Host: {metadata.get('target_host', 'N/A')}\n"
+    prompt += f"Connected IP: {metadata.get('connected_ip', 'N/A')}\n"
+    prompt += f"Timestamp: {metadata.get('timestamp', 'N/A')}\n"
+    prompt += f"Tool Version: {metadata.get('tool_version', 'N/A')}\n"
+    prompt += f"OpenSSL Version: {metadata.get('openssl_version', 'N/A')}\n"
+    prompt += f"Tested Server: {metadata.get('tested_server', 'N/A')}:{metadata.get('tested_port', 'N/A')} (SNI: {metadata.get('sni_name', 'N/A')})\n\n"
+
+    # Protocols
+    protocols = parsed_data.get("protocols", [])
+    if protocols:
+        prompt += "SSL/TLS Protocols:\n"
+        for proto in protocols:
+            prompt += f"  - {proto.get('name', 'N/A')}: {proto.get('status', 'N/A')}\n"
+    
+    # Security Features
+    security_features = parsed_data.get("security_features", {})
+    if security_features:
+        prompt += "\nTLS Security Features:\n"
+        for feature, status in security_features.items():
+            if isinstance(status, list): # For Heartbleed which can be a list
+                prompt += f"  - {feature.replace('_', ' ').title()}: {', '.join(status)}\n"
+            else:
+                prompt += f"  - {feature.replace('_', ' ').title()}: {status}\n"
+
+    # Supported Ciphers
+    ciphers = parsed_data.get("supported_ciphers", [])
+    if ciphers:
+        prompt += "\nSupported Server Ciphers (Preferred/Accepted):\n"
+        for cipher in ciphers:
+            cipher_info = f"  - {cipher.get('status', 'N/A')} {cipher.get('name', 'N/A')} ({cipher.get('bits', 'N/A')} bits)"
+            if cipher.get('tls_version'):
+                cipher_info += f" on {cipher['tls_version']}"
+            if cipher.get('curve'):
+                cipher_info += f" Curve: {cipher['curve']}"
+            if cipher.get('dhe_bits'):
+                cipher_info += f" DHE: {cipher['dhe_bits']} bits"
+            prompt += f"{cipher_info}\n"
+
+    # Key Exchange Groups
+    key_exchange_groups = parsed_data.get("key_exchange_groups", [])
+    if key_exchange_groups:
+        prompt += "\nServer Key Exchange Groups:\n"
+        for group in key_exchange_groups:
+            group_info = f"  - {group.get('name', 'N/A')} ({group.get('details', 'N/A')})"
+            if group.get('tls_version'):
+                group_info += f" on {group['tls_version']}"
+            if group.get('bits'):
+                group_info += f" ({group['bits']} bits)"
+            prompt += f"{group_info}\n"
+
+    # SSL Certificate
+    certificate = parsed_data.get("ssl_certificate", {})
+    if certificate:
+        prompt += "\nSSL Certificate Details:\n"
+        prompt += f"  - Subject: {certificate.get('subject', 'N/A')}\n"
+        prompt += f"  - Issuer: {certificate.get('issuer', 'N/A')}\n"
+        prompt += f"  - Signature Algorithm: {certificate.get('signature_algorithm', 'N/A')}\n"
+        prompt += f"  - RSA Key Strength: {certificate.get('rsa_key_strength', 'N/A')} bits\n"
+        prompt += f"  - Altnames: {', '.join(certificate.get('altnames', ['N/A']))}\n"
+        prompt += f"  - Valid From: {certificate.get('not_valid_before', 'N/A')}\n"
+        prompt += f"  - Valid Until: {certificate.get('not_valid_after', 'N/A')}\n"
+
+    prompt += "\n--- End SSLScan Report Data ---\n"
+    prompt += "Please provide the summary, key findings, implications, and remediation steps based on the above. "
+    prompt += "Format your response with clear headings: 'Summary', 'Key Findings', 'Implications', 'Remediation Steps'."
+    
+    return prompt
+
 def summarize_report_with_llm(
     llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str
 ) -> str:
@@ -167,7 +254,7 @@ def summarize_report_with_llm(
     Args:
         llm_instance (Llama): The loaded Llama model instance.
         parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
-        report_type (str): The type of the report ("nmap" or "zap").
+        report_type (str): The type of the report ("nmap", "zap", or "sslscan").
 
     Returns:
         str: The generated explanation and remediation steps from the LLM.
@@ -176,13 +263,15 @@ def summarize_report_with_llm(
         prompt = _format_nmap_summary_prompt(parsed_data)
     elif report_type.lower() == "zap":
         prompt = _format_zap_summary_prompt(parsed_data)
+    elif report_type.lower() == "sslscan": # New condition for SSLScan
+        prompt = _format_sslscan_summary_prompt(parsed_data)
     else:
-        return "Error: Unsupported report type for summarization. Please specify 'nmap' or 'zap'."
+        return "Error: Unsupported report type for summarization. Please specify 'nmap', 'zap', or 'sslscan'."
 
     print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
 
     try:
-        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS) # Use config for max_tokens
+        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
         return llm_response
     except Exception as e:
         return f"Error generating LLM response: {e}"
@@ -248,6 +337,8 @@ if __name__ == "__main__":
                  return {"choices": [{"message": {"content": "Mocked Nmap report summary."}}]}
             elif "ZAP Report Data" in full_prompt:
                  return {"choices": [{"message": {"content": "Mocked ZAP report summary."}}]}
+            elif "SSLScan Report Data" in full_prompt: # New mock response for SSLScan
+                return {"choices": [{"message": {"content": "Mocked SSLScan report summary."}}]}
             else:
                 return {"choices": [{"message": {"content": "Mocked LLM response."}}]}
 
@@ -334,6 +425,50 @@ if __name__ == "__main__":
         ]
     }
 
+    # Dummy SSLScan parsed data
+    dummy_sslscan_data = {
+        "scan_metadata": {
+            "tool": "SSLScan Report",
+            "initiated_by": "Maaz",
+            "timestamp": "2025-04-19 12:29:21",
+            "target_host": "hackthissite.org",
+            "tool_version": "2.1.5",
+            "openssl_version": "3.4.0",
+            "connected_ip": "137.74.187.102",
+            "tested_server": "hackthissite.org",
+            "tested_port": 443,
+            "sni_name": "hackthissite.org"
+        },
+        "protocols": [
+            {"name": "SSLv2", "status": "disabled"},
+            {"name": "SSLv3", "status": "disabled"},
+            {"name": "TLSv1.2", "status": "enabled"},
+            {"name": "TLSv1.3", "status": "disabled"}
+        ],
+        "security_features": {
+            "tls_fallback_scsv": "Server supports TLS Fallback SCSV",
+            "tls_renegotiation": "Session renegotiation not supported",
+            "tls_compression": "Compression disabled",
+            "heartbleed": ["TLSv1.2 not vulnerable to heartbleed"]
+        },
+        "supported_ciphers": [
+            {"status": "Preferred", "tls_version": "TLSv1.2", "bits": 256, "name": "ECDHE-RSA-AES256-GCM-SHA384", "curve": "P-256", "dhe_bits": 256}
+        ],
+        "key_exchange_groups": [
+            {"tls_version": "TLSv1.2", "bits": 128, "name": "secp256r1", "details": "NIST P-256"}
+        ],
+        "ssl_certificate": {
+            "signature_algorithm": "sha256WithRSAEncryption",
+            "rsa_key_strength": 4096,
+            "subject": "hackthisjogneh42n5o7gbzrewxee3vyu6ex37ukyvdw6jm66npakiyd.onion",
+            "altnames": ["DNS: hackthissite.org", "DNS:www.hackthissite.org"],
+            "issuer": "HARICA DV TLS RSA",
+            "not_valid_before": "Mar 25 04:43:22 2025 GMT",
+            "not_valid_after": "Mar 25 04:43:22 2026 GMT"
+        }
+    }
+
+
     if dummy_llm_instance:
         print("\n--- Testing with Nmap Report ---")
         nmap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_nmap_data, "nmap")
@@ -345,6 +480,11 @@ if __name__ == "__main__":
         print("Generated ZAP Summary:")
         print(zap_summary)
         
+        print("\n--- Testing with SSLScan Report ---") # New test call
+        sslscan_summary = summarize_report_with_llm(dummy_llm_instance, dummy_sslscan_data, "sslscan")
+        print("Generated SSLScan Summary:")
+        print(sslscan_summary)
+
         # Test summarize_chat_history_segment
         print("\n--- Testing chat history summarization ---")
         test_history_segment = [
