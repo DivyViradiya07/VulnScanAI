@@ -24,16 +24,16 @@ PINECONE_INDEX_NAME = "owasp-qa"
 PINECONE_EMBEDDING_DIMENSION = 768 # Dimension of your SentenceTransformer embeddings (e.g., for all-mpnet-base-v2)
 PINECONE_METRIC = "cosine" # Metric used in Pinecone index (e.g., "cosine")
 PINECONE_CLOUD = "aws" # Your Pinecone cloud provider (e.g., "aws", "gcp", "azure")
-PINECONE_REGION = "us-west-2" # Your Pinecone region
+PINECONE_REGION = "us-east-1" # Your Pinecone region
 
 # --- Chatbot Settings ---
-DEFAULT_MAX_TOKENS = 500 # Max tokens for LLM responses
+DEFAULT_MAX_TOKENS = 1000 # Max tokens for LLM responses
 DEFAULT_RAG_TOP_K = 3 # Number of top results to retrieve from Pinecone
 
 # --- Chat History Management Settings ---
 CHAT_HISTORY_MAX_TURNS = 8 # Maximum number of turns (user+assistant) to keep in full detail
 CHAT_HISTORY_SUMMARIZE_THRESHOLD = 4 # Number of oldest turns to summarize when MAX_TURNS is reached
-DEFAULT_SUMMARIZE_MAX_TOKENS = 150 # Max tokens for generated chat history summaries
+DEFAULT_SUMMARIZE_MAX_TOKENS = 1000 # Max tokens for generated chat history summaries
 
 # --- Heuristic Keywords for Report-Specific Questions ---
 # These keywords help determine if a question is about the uploaded report.

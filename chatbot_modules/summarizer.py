@@ -1,9 +1,10 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 import os
 import sys
 import dotenv
 import uuid
+import re
 
 # Load environment variables from a .env file (if present)
 dotenv.load_dotenv()
@@ -244,246 +245,271 @@ def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     
     return prompt
 
-def summarize_report_with_llm(
-    llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str
-) -> str:
+def _format_mobsf_raw_text_summary_prompt(raw_text: str) -> str:
     """
-    Generates a natural language summary and remediation steps for a parsed security report
-    using the local LLM.
-
-    Args:
-        llm_instance (Llama): The loaded Llama model instance.
-        parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
-        report_type (str): The type of the report ("nmap", "zap", or "sslscan").
-
-    Returns:
-        str: The generated explanation and remediation steps from the LLM.
+    Crafts a detailed prompt for the LLM based on raw MobSF report text.
+    Instructs the LLM to summarize key findings directly from the provided text,
+    focusing on app security score, identified vulnerabilities, and platform-specific details.
     """
-    if report_type.lower() == "nmap":
-        prompt = _format_nmap_summary_prompt(parsed_data)
-    elif report_type.lower() == "zap":
-        prompt = _format_zap_summary_prompt(parsed_data)
-    elif report_type.lower() == "sslscan": # New condition for SSLScan
-        prompt = _format_sslscan_summary_prompt(parsed_data)
-    else:
-        return "Error: Unsupported report type for summarization. Please specify 'nmap', 'zap', or 'sslscan'."
+    # Determine if it's an Android or iOS report based on keywords in the raw text
+    os_type = "Mobile" # Default
+    if re.search(r'ANDROID STATIC ANALYSIS REPORT', raw_text, re.IGNORECASE):
+        os_type = "Android"
+    elif re.search(r'IOS STATIC ANALYSIS REPORT', raw_text, re.IGNORECASE):
+        os_type = "iOS"
 
-    print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
-
-    try:
-        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
-        return llm_response
-    except Exception as e:
-        return f"Error generating LLM response: {e}"
-
-
-def summarize_chat_history_segment(
-    llm_instance: Any, history_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
-) -> str:
-    """
-    Uses the LLM to summarize a segment of the chat history.
-
-    Args:
-        llm_instance (Any): The loaded Llama model instance.
-        history_segment (List[Dict[str, str]]): A list of message dictionaries
-                                                 (e.g., [{'role': 'user', 'content': '...'}, ...]).
-        max_tokens (int): Maximum tokens for the summary.
-
-    Returns:
-        str: A concise summary of the conversation segment.
-    """
-    if not history_segment:
-        return ""
-
-    # Construct the prompt for summarization
-    summarization_prompt = (
-        "Please summarize the following conversation history concisely. "
-        "Focus on the main topics discussed and any key questions or conclusions.\n\n"
-        "--- Conversation History to Summarize ---\n"
+    platform_specific_details = ""
+    if os_type == "Android":
+        platform_specific_details = "- **Dangerous Permissions:** Highlight any dangerous permissions requested by the application.\n"
+    elif os_type == "iOS":
+        platform_specific_details = "- **Insecure API Calls (iOS):** Highlight any insecure API calls or configurations specific to iOS.\n"
+    
+    prompt = (
+        f"As a cybersecurity analyst, analyze the following MobSF {os_type} Static Analysis Report.\n"
+        "This report is provided as raw text because a structured parser is not available for it.\n"
+        "Your task is to read through the raw text and extract the most critical information:\n"
+        "- **Overall App Security Score and Grade.**\n"
+        "- **Findings Severity Summary:** Breakdown of High, Medium, Info, and Secure findings.\n"
+        "- **Key File and App Information:** Application name, package/identifier, file hashes.\n"
+        "- **Identified Vulnerabilities/Issues:** Any specific security vulnerabilities, weaknesses, or misconfigurations mentioned.\n"
+        f"{platform_specific_details}" # Dynamically added platform-specific line
+        "- **Certificate Information:** Details about the signing certificate, if available.\n"
+        "\n"
+        "Based on these extracted points, provide a concise high-level summary of the report's security posture.\n"
+        "Then, list significant findings or potential security implications.\n"
+        "Finally, suggest general remediation steps based on the type of issues commonly found in mobile security reports.\n\n"
+        "--- MobSF Raw Report Text ---\n"
+        f"{raw_text}\n\n"
+        "Consider the above MobSF raw report text. Generate a comprehensive summary, list key findings, and propose actionable remediation steps.\n"
+        "Focus only on information present in the provided text and keep the response structured\n"
     )
-    
-    # Concatenate the history segment into a string for the LLM
-    for msg in history_segment:
-        summarization_prompt += f"{msg['role'].capitalize()}: {msg['content']}\n"
-    
-    summarization_prompt += "--- End Conversation History ---\n\nSummary:"
+    return prompt
 
-    print(f"\n--- Sending chat history segment to LLM for summarization (length: {len(summarization_prompt)} chars) ---")
+
+def summarize_report_with_llm(llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str) -> str:
+    """
+    Generates a summary of the provided structured security report using the LLM.
+    This function handles Nmap, ZAP, and SSLScan reports which provide parsed dictionary data.
+
+    Args:
+        llm_instance (Llama): The loaded LLM model instance.
+        parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
+        report_type (str): The type of the report ('nmap', 'zap', 'sslscan').
+
+    Returns:
+        str: A summary of the report.
+    """
+    prompt_formatter = None
+    if report_type == 'nmap':
+        prompt_formatter = _format_nmap_summary_prompt
+    elif report_type == 'zap':
+        prompt_formatter = _format_zap_summary_prompt
+    elif report_type == 'sslscan':
+        prompt_formatter = _format_sslscan_summary_prompt
+    else:
+        return f"Error: Unsupported structured report type '{report_type}' for summarization."
+
+    # Generate the specific prompt using the formatter
+    summary_prompt = prompt_formatter(parsed_data)
+    
+    # Generate response using the LLM
+    summary = generate_response(llm_instance, summary_prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+    return summary
+
+def summarize_raw_text_report_with_llm(llm_instance: Llama, raw_text: str, report_type: str) -> str:
+    """
+    Generates a summary of a raw text security report (e.g., MobSF) using the LLM.
+
+    Args:
+        llm_instance (Llama): The loaded LLM model instance.
+        raw_text (str): The raw text content of the report.
+        report_type (str): The type of the report (e.g., 'mobsf').
+
+    Returns:
+        str: A summary of the report.
+    """
+    if report_type == 'mobsf':
+        summary_prompt = _format_mobsf_raw_text_summary_prompt(raw_text)
+    else:
+        return f"Error: Unsupported raw text report type '{report_type}' for summarization."
+    
+    # Generate response using the LLM
+    summary = generate_response(llm_instance, summary_prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+    return summary
+
+
+def summarize_chat_history_segment(llm_instance: Llama, chat_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS) -> str:
+    """
+    Summarizes a segment of the chat history to condense it for the LLM's context window.
+
+    Args:
+        llm_instance (Llama): The loaded LLM model instance.
+        chat_segment (List[Dict[str, str]]): A list of chat messages (user/assistant) to summarize.
+        max_tokens (int): The maximum number of tokens for the summary.
+
+    Returns:
+        str: A concise summary of the chat segment.
+    """
+    if not chat_segment:
+        return "The previous conversation was brief."
+
+    # Format the chat segment into a single string for the LLM
+    formatted_segment = ""
+    for msg in chat_segment:
+        formatted_segment += f"{msg['role'].capitalize()}: {msg['content']}\n"
+
+    prompt = (
+        "Condense the following conversation segment into a concise summary, focusing on the main topics discussed and any conclusions reached.\n"
+        "Ensure the summary captures key information from both user and assistant turns.\n\n"
+        f"Conversation Segment:\n{formatted_segment}\n\n"
+        "Concise Summary:"
+    )
 
     try:
-        # Call generate_response with the summarization prompt
-        # We enforce a smaller max_tokens for summarization to keep it concise
-        summary_response = generate_response(llm_instance, summarization_prompt, max_tokens=max_tokens)
-        return summary_response.strip()
+        summary = generate_response(llm_instance, prompt, max_tokens=max_tokens)
+        return summary
     except Exception as e:
-        print(f"Error generating history summary: {e}")
-        return "(Error summarizing previous conversation. Some context may be lost.)"
+        print(f"Error summarizing chat history segment: {e}")
+        return "Could not summarize previous conversation."
 
 
-# Example usage (for testing summarizer.py directly if needed)
 if __name__ == "__main__":
-    print("--- Testing summarizer.py directly ---")
-    # This requires a dummy local_llm and parsed data.
-    # In a real run, main.py will handle loading and parsing.
-
-    # Mock LLM instance for local testing without actual model download/load
-    class MockLlama:
-        def create_chat_completion(self, messages, max_tokens, temperature, stop):
-            # For simplicity, mock the chat completion response
-            full_prompt = messages[0]['content'] if messages else ""
-            if "summarize the following conversation history" in full_prompt.lower():
-                return {"choices": [{"message": {"content": "Mocked summary of the conversation history."}}]}
-            elif "Nmap Report Data" in full_prompt:
-                 return {"choices": [{"message": {"content": "Mocked Nmap report summary."}}]}
-            elif "ZAP Report Data" in full_prompt:
-                 return {"choices": [{"message": {"content": "Mocked ZAP report summary."}}]}
-            elif "SSLScan Report Data" in full_prompt: # New mock response for SSLScan
-                return {"choices": [{"message": {"content": "Mocked SSLScan report summary."}}]}
-            else:
-                return {"choices": [{"message": {"content": "Mocked LLM response."}}]}
-
-    # Override generate_response for this test block
+    # Dummy generate_response for testing purposes if LLM is not actually loaded
     _original_generate_response = generate_response
-    def generate_response(llm_instance, prompt, max_tokens=256, temperature=0.7, stop=["</s>"]):
-        return llm_instance.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=stop
-        )["choices"][0]["message"]["content"]
+    
+    def dummy_generate_response(llm_instance_dummy, prompt_text, max_tokens):
+        print(f"\n--- Dummy LLM Call (Max Tokens: {max_tokens}) ---\nPrompt starts with: {prompt_text[:200]}...")
+        if "nmap" in prompt_text.lower() and "report data" in prompt_text.lower():
+            return "Dummy Nmap Summary: Scanned hosts, found some open ports and OS details."
+        elif "zap" in prompt_text.lower() and "report data" in prompt_text.lower():
+            return "Dummy ZAP Summary: Identified several web vulnerabilities, including a high-risk SQL Injection."
+        elif "sslscan" in prompt_text.lower() and "report data" in prompt_text.lower():
+            return "Dummy SSLScan Summary: Analyzed SSL/TLS configurations, found weak protocols and an expired certificate."
+        elif "mobsf raw report text" in prompt_text.lower():
+            return "Dummy MobSF Summary: Reviewed mobile application. Overall low risk, but noted some excessive permissions and an outdated SDK."
+        elif "conversation segment" in prompt_text.lower():
+            return "Dummy Chat History Summary: User asked about X, bot explained Y and Z."
+        return "Dummy LLM Response."
 
-    dummy_llm_instance = MockLlama()
-    print("Using Mock LLM for summarizer test.")
+    # Override generate_response for testing
+    generate_response = dummy_generate_response
 
+    # Dummy LLM instance for testing (not a real Llama instance)
+    class DummyLLMInstance:
+        def __init__(self):
+            print("Dummy LLM instance created for testing summarizer.")
+        def create_chat_completion(self, *args, **kwargs):
+            return {"choices": [{"message": {"content": "Dummy response from chat completion."}}]}
 
-    # Dummy Nmap parsed data
-    dummy_nmap_data = {
-        "scan_metadata": {
-            "scan_initiated_by": "User",
-            "timestamp": "Fri Jun 18 10:00:00 2025 IST",
-            "target": "example.com (192.168.1.1)",
-            "nmap_version": "7.92",
-            "scan_type": "Port Scan",
-            "scan_duration": "10.5 seconds"
-        },
-        "hosts": [
-            {
-                "ip_address": "192.168.1.1",
-                "hostname": "example.com",
-                "status": "up",
-                "latency": "0.002s",
-                "os_detection": {
-                    "os_guesses": ["Linux 3.10 - 4.11"],
-                    "device_type": ["general purpose"]
-                },
-                "ports": [
-                    {
-                        "port_id": 22, "protocol": "tcp", "state": "open", "service": "ssh",
-                        "version": "OpenSSH 7.6p1 Ubuntu 4ubuntu0.3 (Ubuntu Linux; protocol 2.0)",
-                        "script_outputs": {"ssh-hostkey": "2048 SHA256:abcd... (RSA)"}
-                    },
-                    {
-                        "port_id": 80, "protocol": "tcp", "state": "open", "service": "http",
-                        "version": "Apache httpd 2.4.29 ((Ubuntu))",
-                        "script_outputs": {"http-title": "Apache2 Ubuntu Default Page"}
-                    }
-                ]
-            }
-        ]
-    }
-
-    # Dummy ZAP parsed data
-    dummy_zap_data = {
-        "scan_metadata": {
-            "tool": "Checkmarx ZAP Report",
-            "report_id": "12345-abcde",
-            "generated_at": "2025-06-18T10:05:00",
-            "site": "http://testphp.vulnweb.com",
-            "zap_version": "2.10.0"
-        },
-        "summary": {
-            "risk_counts": {"High": 1, "Medium": 2, "Low": 3, "Informational": 5, "False Positives": 0},
-            "total_alerts": 11
-        },
-        "vulnerabilities": [
-            {
-                "name": "SQL Injection", "risk": "High",
-                "description": "SQL Injection vulnerability found in parameter 'id'.",
-                "urls": [{"url": "http://testphp.vulnweb.com/listproducts.php?cat=1", "method": "GET", "parameter": "id", "attack": "id=1'%20OR%201=1--", "evidence": "Error message with SQL syntax"}],
-                "solution": "Use parameterized queries or prepared statements.",
-                "references": ["https://owasp.org/www-community/attacks/SQL_Injection"],
-                "cwe_id": 89
-            },
-            {
-                "name": "Cross Site Scripting (XSS)", "risk": "Medium",
-                "description": "Reflected XSS vulnerability identified.",
-                "urls": [{"url": "http://testphp.vulnweb.com/search.php?test=1", "method": "GET", "parameter": "test", "attack": "<script>alert(1)</script>", "evidence": "Reflected script in response"}],
-                "solution": "Implement proper input validation and output encoding.",
-                "references": ["https://owasp.org/www-community/attacks/xss/"],
-                "cwe_id": 79
-            }
-        ]
-    }
-
-    # Dummy SSLScan parsed data
-    dummy_sslscan_data = {
-        "scan_metadata": {
-            "tool": "SSLScan Report",
-            "initiated_by": "Maaz",
-            "timestamp": "2025-04-19 12:29:21",
-            "target_host": "hackthissite.org",
-            "tool_version": "2.1.5",
-            "openssl_version": "3.4.0",
-            "connected_ip": "137.74.187.102",
-            "tested_server": "hackthissite.org",
-            "tested_port": 443,
-            "sni_name": "hackthissite.org"
-        },
-        "protocols": [
-            {"name": "SSLv2", "status": "disabled"},
-            {"name": "SSLv3", "status": "disabled"},
-            {"name": "TLSv1.2", "status": "enabled"},
-            {"name": "TLSv1.3", "status": "disabled"}
-        ],
-        "security_features": {
-            "tls_fallback_scsv": "Server supports TLS Fallback SCSV",
-            "tls_renegotiation": "Session renegotiation not supported",
-            "tls_compression": "Compression disabled",
-            "heartbleed": ["TLSv1.2 not vulnerable to heartbleed"]
-        },
-        "supported_ciphers": [
-            {"status": "Preferred", "tls_version": "TLSv1.2", "bits": 256, "name": "ECDHE-RSA-AES256-GCM-SHA384", "curve": "P-256", "dhe_bits": 256}
-        ],
-        "key_exchange_groups": [
-            {"tls_version": "TLSv1.2", "bits": 128, "name": "secp256r1", "details": "NIST P-256"}
-        ],
-        "ssl_certificate": {
-            "signature_algorithm": "sha256WithRSAEncryption",
-            "rsa_key_strength": 4096,
-            "subject": "hackthisjogneh42n5o7gbzrewxee3vyu6ex37ukyvdw6jm66npakiyd.onion",
-            "altnames": ["DNS: hackthissite.org", "DNS:www.hackthissite.org"],
-            "issuer": "HARICA DV TLS RSA",
-            "not_valid_before": "Mar 25 04:43:22 2025 GMT",
-            "not_valid_after": "Mar 25 04:43:22 2026 GMT"
-        }
-    }
-
+    dummy_llm_instance = DummyLLMInstance()
 
     if dummy_llm_instance:
-        print("\n--- Testing with Nmap Report ---")
+        print("\n--- Testing Report Summarization ---")
+
+        # Test Nmap summary
+        dummy_nmap_data = {
+            "scan_metadata": {"target": "example.com", "scan_type": "SYN Scan", "scan_start": "2025-01-01", "nmap_version": "7.92"},
+            "hosts": [
+                {"ip_address": "192.168.1.1", "hostname": "host1.example.com",
+                 "os_detection": {"os_match": [{"name": "Linux 2.6.32", "accuracy": 90}]},
+                 "ports": [{"port_id": "80", "protocol": "tcp", "state": "open", "service": "http", "version": "nginx 1.18.0"}]}
+            ]
+        }
         nmap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_nmap_data, "nmap")
         print("Generated Nmap Summary:")
         print(nmap_summary)
 
-        print("\n--- Testing with ZAP Report ---")
+        # Test ZAP summary
+        dummy_zap_data = {
+            "scan_metadata": {"tool": "ZAP", "report_id": "123", "generated_at": "2025-01-01", "site": "https://example.com", "zap_version": "2.10.0"},
+            "summary": {"risk_counts": {"High": 1, "Medium": 2, "Low": 5, "Informational": 3, "False Positives": 0}},
+            "vulnerabilities": [
+                {"name": "SQL Injection", "risk": "High", "description": "SQL injection vulnerability found.", "cwe_id": "89", "urls": [{"url": "https://example.com/login"}]},
+                {"name": "Cross Site Scripting", "risk": "Medium", "description": "XSS vulnerability.", "cwe_id": "79", "urls": [{"url": "https://example.com/search"}]}
+            ]
+        }
         zap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_zap_data, "zap")
         print("Generated ZAP Summary:")
         print(zap_summary)
-        
-        print("\n--- Testing with SSLScan Report ---") # New test call
+
+        # Test SSLScan summary
+        dummy_sslscan_data = {
+            "scan_metadata": {"tool": "SSLScan", "target_host": "secure.example.com", "connected_ip": "1.2.3.4", "scan_time": "2025-01-01T10:00:00Z"},
+            "protocols": [{"name": "TLSv1.0", "status": "enabled", "info": "weak"}],
+            "supported_ciphers": [{"name": "TLS_RSA_WITH_RC4_128_SHA", "key_exchange": "RSA", "bits": "128", "status": "weak"}],
+            "ssl_certificate": {"subject": "CN=secure.example.com", "issuer": "O=Example CA", "valid_from": "2024-01-01", "valid_to": "2025-01-01", "signature_algorithm": "SHA256WithRSA"}
+        }
         sslscan_summary = summarize_report_with_llm(dummy_llm_instance, dummy_sslscan_data, "sslscan")
         print("Generated SSLScan Summary:")
         print(sslscan_summary)
+
+        # Test MobSF raw text summary (NEW function call)
+        dummy_mobsf_raw_data = """
+--- PAGE 1 ---
+
+MOBSF
+
+ANDROID STATIC ANALYSIS REPORT
+
+TESTDROID
+CLOUD
+
+BitbarSampleApp (1.0)
+
+App Security Score:
+Grade:
+
+32/100 (HIGH RISK)
+C
+
+--- PAGE 3 ---
+
+FINDINGS SEVERITY
+
+HIGH
+
+4
+
+MEDIUM
+
+3
+
+INFO
+
+2
+
+SECURE
+
+0
+
+FILE INFORMATION
+File Name: bitbar-sample-app.apk
+Size: 0.11MB
+MD5: 00cc5435151aa38a091781922c0390a4
+
+APP INFORMATION
+App Name: BitbarSampleApp
+Package Name: com.bitbar.testdroid
+Target SDK: 33
+Min SDK: 21
+
+CODE ANALYSIS
+Issue: Insecure Communication
+Severity: High
+Files: ['com.bitbar.testdroid. SomeClass.java']
+
+Issue: Hardcoded Secrets
+Severity: Medium
+Files: ['com.bitbar.testdroid. AnotherClass.java']
+
+APPLICATION PERMISSIONS
+PERMISSION,STATUS,INFO,DESCRIPTION
+android.permission.INTERNET,dangerous,Signature|System,Allows applications to open network sockets.
+android.permission.READ_EXTERNAL_STORAGE,dangerous,Signature,Allows an application to read from external storage.
+"""
+        mobsf_summary = summarize_raw_text_report_with_llm(dummy_llm_instance, dummy_mobsf_raw_data, "mobsf")
+        print("Generated MobSF Summary (using new raw text function):")
+        print(mobsf_summary)
 
         # Test summarize_chat_history_segment
         print("\n--- Testing chat history summarization ---")
@@ -510,4 +536,3 @@ if __name__ == "__main__":
     
     # Restore original generate_response after testing
     generate_response = _original_generate_response
-
