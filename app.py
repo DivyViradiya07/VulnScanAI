@@ -2,7 +2,7 @@ import os
 import sys
 import json
 from typing import Dict, Any, List, Optional
-import atexit # Import atexit for cleanup
+import atexit
 
 # --- Import RAG components for type hinting ---
 try:
@@ -32,328 +32,625 @@ try:
     from nmap_parser import process_nmap_report_file
     from zap_parser import process_zap_report_file
     from ssl_parser import process_sslscan_report_file # New import for SSLScan parser
-    from summarizer import summarize_report_with_llm, summarize_chat_history_segment, summarize_raw_text_report_with_llm
+    from mobsf_android_parser import process_mobsf_android_report_file # New import for Mobsf Android parser
+    from mobsf_ios_parser import process_mobsf_ios_report_file # New import for Mobsf iOS parser
+    from summarizer import summarize_report_with_llm, summarize_chat_history_segment
+    from pdf_extractor import extract_text_from_pdf
+    # Import RAG utilities
     from utils import (
+        load_embedding_model, 
+        initialize_pinecone_index, 
         retrieve_rag_context, 
-        load_report_chunks_and_embeddings,
-        load_raw_text_chunks_and_embeddings, # NEW: Import for raw text reports
+        load_report_chunks_and_embeddings, 
         retrieve_internal_rag_context, 
-        delete_report_namespace,
-        load_embedding_model, # For initial loading feedback
-        initialize_pinecone_index, # For initial loading feedback
-        is_report_specific_question # ADDED: Import for report specific question detection
+        delete_report_namespace 
     )
-    from pdf_extractor import extract_text_from_pdf # For MobSF raw text extraction
-
-
 except ImportError as e:
     print(f"Error importing a module: {e}")
-    print("Please ensure all dependencies are installed and the 'chatbot_modules' directory is correctly set up.")
+    print("Please ensure all modules (local_llm.py, nmap_parser.py, zap_parser.py, sslscan_parser.py, pdf_extractor.py, summarizer.py, chatbot_utils.py, config.py) are located within the 'chatbot_modules' directory and correctly configured in your Python path.")
     sys.exit(1)
 
+# --- Configuration for Local LLM (now from config.py) ---
+MODEL_ID = config.LLM_MODEL_ID
+MODEL_BASENAME = config.LLM_MODEL_BASENAME
+MODEL_DIR = config.LLM_MODEL_DIR 
 
-# Global variables for LLM model, Pinecone index, and current report namespace
+# --- Global Variables for Chatbot State (Initialized once) ---
 llm_instance = None
-current_report_namespace: Optional[str] = None
+current_parsed_report: Optional[Dict[str, Any]] = None
 current_report_type: Optional[str] = None
-# Store the raw text content of the MobSF report for RAG
-current_mobsf_raw_text: Optional[str] = None 
+current_report_namespace: Optional[str] = None 
+chat_history: List[Dict[str, str]] = [] # Initialized as an empty list here
 
+# Global variables for RAG components
+_embedding_model_instance: Optional[SentenceTransformer] = None
+_pinecone_index_instance: Optional[Index] = None
+
+
+def load_llm_model_once():
+    """Loads the LLM model only if it hasn't been loaded yet."""
+    global llm_instance
+    if llm_instance is None:
+        try:
+            from local_llm import load_model
+            llm_instance = load_model(
+                model_id=config.LLM_MODEL_ID,
+                model_basename=config.LLM_MODEL_BASENAME,
+                local_dir=config.LLM_MODEL_DIR
+            )
+            # Register cleanup function
+            atexit.register(cleanup_llm)
+        except Exception as e:
+            print(f"Error loading language model: {e}")
+            sys.exit(1)
+    return llm_instance
 
 def cleanup_llm():
-    """Explicitly closes the LLM model to free up resources and deletes Pinecone namespace."""
+    """Clean up the LLM instance on program exit."""
     global llm_instance
-    global current_report_namespace
+    if llm_instance is not None:
+        try:
+            # Properly clean up the model instance
+            if hasattr(llm_instance, 'close'):
+                llm_instance.close()
+            llm_instance = None
+        except Exception as e:
+            # Ignore errors during cleanup
+            pass
 
-    try:
-        if current_report_namespace:
-            print(f"\n--- Cleaning up Pinecone namespace: {current_report_namespace} ---")
-            delete_report_namespace(current_report_namespace)
-            current_report_namespace = None
-        
-        if llm_instance is not None:
-            print("\n--- Closing LLM model ---")
-            # Check if the model object has a 'close' method and call it
-            if hasattr(llm_instance, 'close') and callable(llm_instance.close):
-                # llama_cpp models might have an internal _model to check
-                if hasattr(llm_instance, '_model') and llm_instance._model is not None:
-                    llm_instance.close()
-                    print("LLM model closed successfully.")
-                else:
-                    print("LLM model already closed or invalid.")
-            else:
-                print("LLM model does not have a close method.")
-            llm_instance = None # Clear the instance
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
-        import traceback
-        traceback.print_exc()
-
-# Register cleanup function to be called on script exit
-atexit.register(cleanup_llm)
-
-
-def identify_report_type(file_path: str) -> Optional[str]:
-    """
-    Identifies the type of the security report based on its content (file extension or internal keywords).
+def load_rag_components_once():
+    """Loads the SentenceTransformer model and initializes Pinecone index only if not loaded yet."""
+    global _embedding_model_instance, _pinecone_index_instance
+    if _embedding_model_instance is None:
+        try:
+            _embedding_model_instance = load_embedding_model()
+        except Exception as e:
+            print(f"Failed to load embedding model for RAG: {e}")
+            _embedding_model_instance = None
     
+    if _pinecone_index_instance is None and _embedding_model_instance is not None:
+        try:
+            _pinecone_index_instance = initialize_pinecone_index()
+        except Exception as e:
+            print(f"Failed to initialize Pinecone index for RAG: {e}")
+            _pinecone_index_instance = None
+
+
+def reset_chat_context():
+    """Resets the parsed report and chat history for a new report."""
+    global current_parsed_report, current_report_type, current_report_namespace, chat_history
+    # Delete the old report's namespace if it exists
+    if current_report_namespace:
+        delete_report_namespace(current_report_namespace)
+    
+    current_parsed_report = None
+    current_report_type = None
+    current_report_namespace = None # Reset the namespace
+    chat_history = [] # Clear history for new report
+
+def detect_report_type(pdf_path: str) -> Optional[str]:
+    """
+    Attempts to detect the type of the security report (Nmap, ZAP, or SSLScan)
+    by reading a small portion of its text and looking for keywords.
+
     Args:
-        file_path (str): The path to the report file.
-        
+        pdf_path (str): The path to the PDF file.
+
     Returns:
-        Optional[str]: The identified report type ('nmap', 'zap', 'sslscan', 'mobsf'), or None if unknown.
+        Optional[str]: "nmap", "zap", "sslscan", or None if detection fails.
     """
-    # Simple check for file extension (most common PDF names often contain the tool name)
-    filename = os.path.basename(file_path).lower()
-
-    if "nmap" in filename:
-        return "nmap"
-    elif "zap" in filename or "checkmarx" in filename: # ZAP reports might contain "Checkmarx" in their name/content
-        return "zap"
-    elif "sslscan" in filename:
-        return "sslscan"
-    elif "mobsf" in filename:
-        return "mobsf"
-    
-    # For more robust identification, you might read the first few lines of the PDF
-    # or look for specific keywords in the extracted text.
-    # For now, we rely on filename.
-    print(f"Could not conclusively determine report type from filename: {filename}. Attempting to extract text for more robust detection...")
     try:
-        # Extract a small portion of text to infer type if filename isn't clear
-        raw_text_sample = extract_text_from_pdf(file_path)[:2000].lower() # Read first 2KB
-        if "nmap scan report" in raw_text_sample or "nmap done" in raw_text_sample:
-            return "nmap"
-        elif "zap" in raw_text_sample and ("report" in raw_text_sample or "vulnerabilities" in raw_text_sample):
-            return "zap"
-        elif "ssl/tls vulnerability scan report" in raw_text_sample or "sslscan" in raw_text_sample:
-            return "sslscan"
-        elif "mobsf" in raw_text_sample and ("android static analysis report" in raw_text_sample or "ios static analysis report" in raw_text_sample):
-            return "mobsf"
-    except Exception as e:
-        print(f"Error reading PDF sample for type detection: {e}")
+        raw_text = extract_text_from_pdf(pdf_path)
+        lower_text = raw_text.lower()
 
-    return None
+        nmap_keywords = ["nmap scan report for", "starting nmap", "port state service", "network distance", "traceroute"]
+        if any(keyword in lower_text for keyword in nmap_keywords):
+            return "nmap"
+
+        zap_keywords = ["checkmarx zap report", "zap version:", "alert detail", "summary of alerts", "risk level", "cwe id"]
+        if any(keyword in lower_text for keyword in zap_keywords):
+            return "zap"
+        
+        # New keywords for SSLScan
+        sslscan_keywords = ["ssl/tls vulnerability scan report", "ssl/tls protocols:", "supported server cipher(s):", "ssl certificate:"]
+        if any(keyword in lower_text for keyword in sslscan_keywords):
+            return "sslscan"
+        
+        # New keywords for Mobsf Android
+        mobsf_android_keywords = ["android static analysis report", "apkid", "manifest analysis"]
+        if any(keyword in lower_text for keyword in mobsf_android_keywords):
+            return "mobsf_android"
+
+        # New keywords for Mobsf iOS
+        mobsf_ios_keywords = ["ios static analysis report", "ipa","binary"]
+        if any(keyword in lower_text for keyword in mobsf_ios_keywords):
+            return "mobsf_ios"
+
+        return None
+    except Exception as e:
+        print(f"Error during report type detection: {e}")
+        return None
+
+def is_report_specific_question(question: str, report_data: Dict[str, Any]) -> bool:
+    """
+    Heuristically determines if a question is specific to the loaded Nmap/ZAP/SSLScan report.
+    This check is performed only if a report is currently loaded.
+    """
+    if not report_data:
+        return False # Cannot be report-specific if no report is loaded
+
+    question_lower = question.lower()
+
+    # Use keywords from config.py
+    if any(keyword in question_lower for keyword in config.REPORT_SPECIFIC_KEYWORDS):
+        return True
+
+    # More specific checks using data from the loaded report
+    report_tool = report_data.get("scan_metadata", {}).get("tool", "").lower()
+
+    if "nmap" in report_tool:
+        for host in report_data.get("hosts", []):
+            if host.get("ip_address") and host["ip_address"].lower() in question_lower:
+                return True
+            if host.get("hostname") and host["hostname"].lower() in question_lower:
+                return True
+            for port in host.get("ports", []):
+                if f"port {port.get('port_id')}" in question_lower or f":{port.get('port_id')}" in question_lower:
+                    return True
+                if port.get("service") and port["service"].lower() in question_lower:
+                    return True
+
+    elif "zap" in report_tool:
+        for vuln in report_data.get("vulnerabilities", []):
+            if vuln.get("name") and vuln["name"].lower() in question_lower:
+                return True
+            if vuln.get("cwe_id") and f"cwe {vuln['cwe_id']}" in question_lower:
+                return True
+            if vuln.get("wasc_id") and f"wasc {vuln['wasc_id']}" in question_lower:
+                return True
+            if vuln.get("risk") and vuln["risk"].lower() in question_lower: # e.g., "high risk vulnerabilities"
+                return True
+            for url_detail in vuln.get("urls", []):
+                if url_detail.get("url") and url_detail["url"].lower() in question_lower:
+                    # Check if the full URL or parts of it are in the question
+                    if url_detail["url"].lower() in question_lower or \
+                       url_detail["url"].split('//')[-1].split('/')[0].lower() in question_lower:
+                        return True
+    
+    # New checks for SSLScan
+    elif "sslscan" in report_tool:
+        ssl_metadata = report_data.get("scan_metadata", {})
+        if ssl_metadata.get("target_host") and ssl_metadata["target_host"].lower() in question_lower:
+            return True
+        if ssl_metadata.get("connected_ip") and ssl_metadata["connected_ip"].lower() in question_lower:
+            return True
+        if ssl_metadata.get("sni_name") and ssl_metadata["sni_name"].lower() in question_lower:
+            return True
+        
+        # Check for protocols, ciphers, certificate details
+        if any(p.get("name", "").lower() in question_lower for p in report_data.get("protocols", [])):
+            return True
+        if any(c.get("name", "").lower() in question_lower for c in report_data.get("supported_ciphers", [])):
+            return True
+        if report_data.get("ssl_certificate", {}).get("subject", "").lower() in question_lower:
+            return True
+        if report_data.get("ssl_certificate", {}).get("issuer", "").lower() in question_lower:
+            return True
+        if "tls" in question_lower or "ssl" in question_lower or "cipher" in question_lower or "certificate" in question_lower:
+            return True
+
+    elif "mobsf" in report_tool and "android" in report_tool:
+            app_info = report_data.get("app_information", {})
+            scan_metadata = report_data.get("scan_metadata", {})
+            summary = report_data.get("summary", {})
+            certificate_info = report_data.get("certificate_information", {})
+            
+            # Check app name, package name, and file name
+            if app_info.get("App Name") and app_info["App Name"].lower() in question_lower:
+                return True
+            if app_info.get("Package Name") and app_info["Package Name"].lower() in question_lower:
+                return True
+            if scan_metadata.get("file_name") and scan_metadata["file_name"].lower() in question_lower:
+                return True
+
+            # Check security score, grade, and total issues
+            if scan_metadata.get("app_security_score") and (str(scan_metadata["app_security_score"]).split('/')[0] in question_lower or scan_metadata["app_security_score"].lower() in question_lower):
+                return True
+            if scan_metadata.get("grade") and scan_metadata["grade"].lower() in question_lower:
+                return True
+            if summary.get("total_issues") and str(summary["total_issues"]) in question_lower:
+                return True
+            
+            # Check for severity counts
+            for severity_type, count in summary.get("findings_severity", {}).items():
+                if severity_type.lower() in question_lower and str(count) in question_lower:
+                    return True
+
+            # Check for vulnerability titles/issues and their details across various finding types
+            vulnerability_sections = [
+                report_data.get("certificate_analysis_findings", []),
+                report_data.get("manifest_analysis_findings", []),
+                report_data.get("code_analysis_findings", [])
+            ]
+            
+            for section in vulnerability_sections:
+                for finding in section:
+                    if finding.get("title") and finding["title"].lower() in question_lower:
+                        return True
+                    if finding.get("issue") and finding["issue"].lower() in question_lower:
+                        return True
+                    if finding.get("severity") and finding["severity"].lower() in question_lower:
+                        return True
+                    if finding.get("description") and finding["description"].lower() in question_lower:
+                        return True # e.g., "what is the description of the high severity issue?"
+
+            # Check for permissions and their status
+            for perm_entry in report_data.get("application_permissions", []):
+                if perm_entry.get("permission") and perm_entry["permission"].lower() in question_lower:
+                    return True
+                if perm_entry.get("status") and perm_entry["status"].lower() in question_lower:
+                    return True # e.g., "dangerous permissions"
+                if perm_entry.get("info") and perm_entry["info"].lower() in question_lower:
+                    return True
+                if perm_entry.get("description") and perm_entry["description"].lower() in question_lower:
+                    return True
+
+            # Check certificate details
+            if certificate_info.get("X.509 Subject") and certificate_info["X.509 Subject"].lower() in question_lower:
+                return True
+            if certificate_info.get("Issuer") and certificate_info["Issuer"].lower() in question_lower:
+                return True
+            if certificate_info.get("md5_fingerprint") and certificate_info["md5_fingerprint"].lower() in question_lower:
+                return True
+            if certificate_info.get("sha1_fingerprint") and certificate_info["sha1_fingerprint"].lower() in question_lower:
+                return True
+            if certificate_info.get("sha256_fingerprint") and certificate_info["sha256_fingerprint"].lower() in question_lower:
+                return True
+            if certificate_info.get("Signature Algorithm") and certificate_info["Signature Algorithm"].lower() in question_lower:
+                return True
+            if certificate_info.get("Bit Size") and str(certificate_info["Bit Size"]) in question_lower:
+                return True
+
+            # Check for APK ID analysis findings
+            for apkid_finding in report_data.get("apkid_analysis", []):
+                if apkid_finding.get("finding") and apkid_finding["finding"].lower() in question_lower:
+                    return True
+                if apkid_finding.get("details") and apkid_finding["details"].lower() in question_lower:
+                    return True
+
+            # Check abused permissions summary
+            abused_perms = report_data.get("abused_permissions_summary", {}).get("Malware Permissions", {})
+            if abused_perms.get("description") and abused_perms["description"].lower() in question_lower:
+                return True
+            for perm in abused_perms.get("permissions", []):
+                if perm.lower() in question_lower:
+                    return True
+
+            # Generic MobSF Android keywords (can be kept or refined further based on needs)
+            mobsf_general_keywords = [
+                "mobsf", "android report", "app info", "manifest", "permissions", 
+                "abused permissions", "certificate", "signature", "sdk", "activity",
+                "security score", "issues", "vulnerabilities", "findings", "apkid"
+            ]
+            if any(keyword in question_lower for keyword in mobsf_general_keywords):
+                return True
+
+    elif "mobsf" in report_tool and "ios" in report_tool:
+        app_info = report_data.get("app_information", {})
+        scan_metadata = report_data.get("scan_metadata", {})
+        summary = report_data.get("summary", {})
+        code_signature_info = report_data.get("code_signature_info", {}) 
+
+        # Check app name, identifier, and file name
+        if app_info.get("App Name") and app_info["App Name"].lower() in question_lower:
+            return True
+        if app_info.get("Identifier") and app_info["Identifier"].lower() in question_lower:
+            return True
+        if scan_metadata.get("file_name") and scan_metadata["file_name"].lower() in question_lower:
+            return True
+
+        # Check security score, grade, and total issues
+        if scan_metadata.get("app_security_score") and (str(scan_metadata["app_security_score"]).split('/')[0] in question_lower or scan_metadata["app_security_score"].lower() in question_lower):
+            return True
+        if scan_metadata.get("grade") and scan_metadata["grade"].lower() in question_lower:
+            return True
+        if summary.get("total_issues") and str(summary["total_issues"]) in question_lower:
+            return True
+        
+        # Check for severity counts
+        for severity_type, count in summary.get("findings_severity", {}).items():
+            if severity_type.lower() in question_lower and str(count) in question_lower:
+                return True
+
+        # Check for vulnerability titles/issues and their details across various finding types (iOS specific)
+        vulnerability_sections = [
+            report_data.get("app_transport_security_findings", []),
+            report_data.get("ipa_binary_code_analysis_findings", []),
+            report_data.get("ipa_binary_analysis_findings", [])
+        ]
+        
+        for section in vulnerability_sections:
+            for finding in section:
+                if finding.get("title") and finding["title"].lower() in question_lower:
+                    return True
+                if finding.get("issue") and finding["issue"].lower() in question_lower:
+                    return True
+                if finding.get("severity") and finding["severity"].lower() in question_lower:
+                    return True
+                if finding.get("description") and finding["description"].lower() in question_lower:
+                    return True
+                if finding.get("protection") and finding["protection"].lower() in question_lower: # For binary analysis findings
+                    return True
+                if finding.get("status") and finding["status"].lower() in question_lower: # For binary analysis findings
+                    return True
+
+        # Check certificate details (code_signature_info for iOS)
+        if code_signature_info:
+            if code_signature_info.get("Team ID") and code_signature_info["Team ID"].lower() in question_lower:
+                return True
+            if code_signature_info.get("Signing Certificate Name") and code_signature_info["Signing Certificate Name"].lower() in question_lower:
+                return True
+            if code_signature_info.get("Signing Certificate Hash SHA256") and code_signature_info["Signing Certificate Hash SHA256"].lower() in question_lower:
+                return True
+            if code_signature_info.get("Provisioning Profile") and code_signature_info["Provisioning Profile"].lower() in question_lower:
+                return True
+
+        # Check OFAC Sanctioned Countries
+        for country_data in report_data.get("ofac_sanctioned_countries", []):
+            if country_data.get("domain") and country_data["domain"].lower() in question_lower:
+                return True
+            if country_data.get("country_region") and country_data["country_region"].lower() in question_lower:
+                return True
+
+        # Check Domain Malware Check
+        for domain_data in report_data.get("domain_malware_check", []):
+            if domain_data.get("domain") and domain_data["domain"].lower() in question_lower:
+                return True
+            if domain_data.get("status") and domain_data["status"].lower() in question_lower:
+                return True
+            if 'geolocation' in domain_data and isinstance(domain_data['geolocation'], dict):
+                geo = domain_data['geolocation']
+                if geo.get('IP') and geo['IP'].lower() in question_lower: return True
+                if geo.get('Country') and geo['Country'].lower() in question_lower: return True
+                if geo.get('Region') and geo['Region'].lower() in question_lower: return True
+                if geo.get('City') and geo['City'].lower() in question_lower: return True
+        
+        # Generic MobSF iOS keywords
+        mobsf_general_ios_keywords = [
+            "mobsf", "ios report", "app info", "app transport security", "ats",
+            "ipa binary analysis", "code signing", "certificate", "provisioning profile",
+            "security score", "issues", "vulnerabilities", "findings", "ofac", "malware domain",
+            "binary protection", "objective-c", "swift"
+        ]
+        if any(keyword in question_lower for keyword in mobsf_general_ios_keywords):
+            return True
+
+    return False
+
 
 def main_cli_loop():
     """
-    Main command-line interface loop for the security chatbot.
-    Handles report processing, summarization, and interactive Q&A.
+    Main loop for the command-line interface of the chatbot.
+    Handles file upload, parsing, initial summary, and interactive chat.
     """
-    global llm_instance
-    global current_report_namespace
-    global current_report_type
-    global current_mobsf_raw_text
+    # Declare global variables that will be reassigned within this function
+    global chat_history 
+    
+    print("--- Welcome to the Security Report Chatbot (CLI Version) ---")
+    print("Enter 'exit' or 'quit' at any time to end the session.")
+    print("Enter 'new_report' to process another PDF.")
 
-    # --- Initial Model and Pinecone Setup ---
-    print("Loading language model and RAG components. This may take a moment...")
-    try:
-        llm_instance = load_model(config.LLM_MODEL_ID, config.LLM_MODEL_BASENAME, config.LLM_MODEL_DIR)
-        _ = load_embedding_model() # Ensure embedding model is loaded
-        _ = initialize_pinecone_index() # Ensure Pinecone is initialized
-        print("Language model and RAG components loaded successfully.")
-    except Exception as e:
-        print(f"Failed to load essential components: {e}")
-        print("Exiting. Please check your model paths, API keys, and internet connection.")
-        sys.exit(1)
+    llm_instance = load_llm_model_once()
+    load_rag_components_once() # Load RAG components at startup
 
-    chat_history: List[Dict[str, str]] = []
-
-    while True:
-        try:
-            if not current_report_type:
-                report_path = input("\nPlease enter the path to your Nmap, ZAP, SSLScan, or MobSF PDF report (or 'exit'/'quit'): ").strip()
-                if report_path.lower() in ['exit', 'quit']:
-                    break
-                if not os.path.exists(report_path):
-                    print(f"Error: File not found at '{report_path}'. Please try again.")
-                    continue
-
-                print("\n--- Detecting report type... ---")
-                current_report_type = identify_report_type(report_path)
-
-                if not current_report_type:
-                    print("Could not identify report type. Please ensure it's a supported Nmap, ZAP, SSLScan, or MobSF PDF.")
-                    continue
-
-                print(f"Detected report type: {current_report_type.upper()}")
-                print(f"\n--- Processing {current_report_type.upper()} report from '{report_path}' ---")
-
-                # --- Process and Load Report Data for RAG ---
-                # Based on report type, call the appropriate parser and then load into Pinecone
-                processed_report_data = None
-                if current_report_type == "nmap":
-                    processed_report_data = process_nmap_report_file(report_path)
-                    print("\n--- Loading report data into temporary Pinecone namespace... ---")
-                    current_report_namespace = load_report_chunks_and_embeddings(processed_report_data, current_report_type)
-                elif current_report_type == "zap":
-                    processed_report_data = process_zap_report_file(report_path)
-                    print("\n--- Loading report data into temporary Pinecone namespace... ---")
-                    current_report_namespace = load_report_chunks_and_embeddings(processed_report_data, current_report_type)
-                elif current_report_type == "sslscan":
-                    processed_report_data = process_sslscan_report_file(report_path)
-                    print("\n--- Loading report data into temporary Pinecone namespace... ---")
-                    current_report_namespace = load_report_chunks_and_embeddings(processed_report_data, current_report_type)
-                elif current_report_type == "mobsf":
-                    # For MobSF, we extract raw text first, then use that for RAG and summarization
-                    print("MobSF report detected. Proceeding with raw text extraction for RAG.")
-                    current_mobsf_raw_text = extract_text_from_pdf(report_path)
-                    if not current_mobsf_raw_text.strip():
-                        print("Error: Could not extract meaningful text from MobSF report.")
-                        current_report_type = None
-                        continue
-                    print("\n--- Loading report data into temporary Pinecone namespace (from raw text)... ---")
-                    # Using default chunk_size and chunk_overlap as defined in utils.py
-                    current_report_namespace = load_raw_text_chunks_and_embeddings(current_mobsf_raw_text, current_report_type)
-                
-                if not current_report_namespace:
-                    print("Failed to load report data into Pinecone namespace. Please check the report format and try again.")
-                    current_report_type = None # Reset to allow re-upload
-                    current_mobsf_raw_text = None
-                    continue
-
-                print(f"Report data loaded into Pinecone namespace: {current_report_namespace}")
-
-                # --- Generate Initial Summary ---
-                print(f"\n--- Generating initial summary for the {current_report_type.upper()} report... ---")
-                initial_summary = ""
-                if current_report_type in ["nmap", "zap", "sslscan"]:
-                    initial_summary = summarize_report_with_llm(llm_instance, processed_report_data, current_report_type)
-                elif current_report_type == "mobsf":
-                    # Use the new summarization function for raw text
-                    initial_summary = summarize_raw_text_report_with_llm(llm_instance, current_mobsf_raw_text, current_report_type)
-
-                print("\n--- Initial Report Summary ---")
-                print(initial_summary)
-                chat_history.append({"role": "assistant", "content": initial_summary})
-
-            # --- Interactive Chat Loop ---
-            user_query = input("\nHow can I help with this report? (Type 'new_report' to upload another, 'exit' to quit): ").strip()
-            if user_query.lower() in ['exit', 'quit']:
+    try: # Start of try block for controlled LLM shutdown
+        while True:
+            report_path = input("\nPlease enter the path to your Cybersecurity report(Ensure it is pdf only): ").strip()
+            if report_path.lower() in ['exit', 'quit']:
                 break
-            if user_query.lower() == 'new_report':
-                if current_report_namespace:
-                    print(f"Clearing previous report data from Pinecone namespace: {current_report_namespace}")
-                    delete_report_namespace(current_report_namespace)
-                current_report_namespace = None
-                current_report_type = None
-                current_mobsf_raw_text = None
-                chat_history = [] # Clear chat history for new report
+            if report_path.lower() == 'new_report':
+                reset_chat_context() 
                 continue
 
-            # Add user query to chat history
-            chat_history.append({"role": "user", "content": user_query})
+            if not os.path.exists(report_path):
+                print(f"Error: File not found at '{report_path}'. Please check the path and try again.")
+                continue
+            if not report_path.lower().endswith(".pdf"):
+                print("Error: Only PDF files are supported. Please provide a .pdf file.")
+                continue
 
-            # --- Chat History Management ---
-            # Summarize old chat history if it exceeds a certain length
-            if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
-                # Summarize the oldest turns (e.g., first N turns)
-                # We want to summarize from the beginning up to CHAT_HISTORY_SUMMARIZE_THRESHOLD turns from the end
-                turns_to_summarize = chat_history[0 : len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD]
+            # --- Report Type Auto-Detection ---
+            print("\n--- Detecting report type... ---")
+            report_type = detect_report_type(report_path)
+
+            if report_type is None:
+                print("Could not automatically detect report type. Please ensure it's a valid Nmap, ZAP, or SSLScan PDF report.")
+                continue # Ask for a new report path
+            
+            print(f"Detected report type: {report_type.upper()}")
+
+            print(f"\n--- Processing {report_type.upper()} report from '{report_path}' ---")
+
+            parsed_data = None
+            try:
+                if report_type.lower() == 'nmap':
+                    parsed_data = process_nmap_report_file(report_path)
+                elif report_type.lower() == 'zap':
+                    parsed_data = process_zap_report_file(report_path)
+                elif report_type.lower() == 'sslscan':
+                    parsed_data = process_sslscan_report_file(report_path)
+                elif report_type.lower() == 'mobsf_android':
+                    parsed_data = process_mobsf_android_report_file(report_path)
+                elif report_type.lower() == 'mobsf_ios':
+                    parsed_data = process_mobsf_ios_report_file(report_path)
                 
-                if turns_to_summarize: # Only summarize if there's a segment to summarize
-                    print(f"\n--- Summarizing {len(turns_to_summarize)} oldest chat turns... ---")
-                    summary_of_old_chat = summarize_chat_history_segment(llm_instance, turns_to_summarize)
-                    print(f"--- Summarized chat segment: {summary_of_old_chat[:100]}... ---") # Print a snippet
-                    
-                    # Replace the old turns with the summary and keep the most recent ones
-                    new_chat_history = [{"role": "system", "content": f"Summary of previous conversation: {summary_of_old_chat}"}]
-                    new_chat_history.extend(chat_history[len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD:])
-                    chat_history = new_chat_history
-                    print(f"(Chat history condensed. New history length: {len(chat_history)} turns)")
-                else:
-                    print("(No chat turns to summarize yet.)")
+                if parsed_data:
+                    global current_parsed_report, current_report_type, current_report_namespace
+                    current_parsed_report = parsed_data
+                    current_report_type = report_type.lower()
+                    print(f"Successfully parsed {report_type.upper()} report.")
 
-
-            # --- Determine RAG Strategy (External KB vs. Internal Report) ---
-            # Check if the user's query is likely about the current report
-            is_report_specific = False
-            # Ensure current_parsed_report is available before checking report specificity
-            if current_report_namespace and current_report_type: # Using current_report_namespace to imply report is loaded
-                 # This heuristic function relies on current_parsed_report, which is only set for structured reports
-                 # For raw text MobSF, we can't use current_parsed_report, so we rely on keywords and the namespace being present.
-                if current_report_type != "mobsf":
-                    # For Nmap, ZAP, SSLScan (structured), use the detailed check
-                    # processed_report_data is only available here if a new report was just loaded.
-                    # It's better to pass it from the outer scope if it was set.
-                    # For a fresh query after initial summary, processed_report_data might be None.
-                    # This needs to be passed correctly or accessed from a global if maintained.
-                    # Assuming processed_report_data is available in this scope after report processing.
-                    is_report_specific = is_report_specific_question(user_query, processed_report_data if processed_report_data else {})
-                else:
-                    # For MobSF (raw text), just check general keywords and if a namespace exists for it
-                    is_report_specific = any(keyword in user_query.lower() for keyword in config.REPORT_SPECIFIC_KEYWORDS)
-
-            rag_context = ""
-            if is_report_specific and current_report_namespace:
-                # Use internal RAG for report-specific questions
-                print(f"\n--- Retrieving context from current '{current_report_type.upper()}' report for query: '{user_query}' ---")
-                rag_context = retrieve_internal_rag_context(user_query, current_report_namespace, config.DEFAULT_RAG_TOP_K)
-                if rag_context:
-                    print(f"--- Retrieved INTERNAL RAG Context (first 100 chars): {rag_context[:100]}... ---")
-                else:
-                    print("--- No highly relevant context found in the current report for your query. ---")
-                    # Fallback to external KB if internal RAG yields nothing for a report-specific query
-                    print("--- Falling back to general knowledge base (EXTERNAL RAG)... ---")
-                    rag_context = retrieve_rag_context(user_query, config.DEFAULT_RAG_TOP_K)
-                    if rag_context:
-                        print(f"--- Retrieved EXTERNAL RAG Context (first 100 chars): {rag_context[:100]}... ---")
+                    # --- Load report chunks and upsert to temporary Pinecone namespace ---
+                    # The current_report_namespace is now managed as an in-memory list in utils.py
+                    # load_report_chunks_and_embeddings now returns the list of chunks with embeddings
+                    if _embedding_model_instance and _pinecone_index_instance:
+                        print("\n--- Loading report data into temporary Pinecone namespace... ---")
+                        # The return type of load_report_chunks_and_embeddings changed
+                        # We still need a namespace to query within Pinecone, so let's stick to the current design
+                        current_report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type)
+                        if current_report_namespace:
+                            print(f"Report data loaded into namespace: {current_report_namespace}")
+                        else:
+                            print("Failed to load report data into Pinecone namespace.")
                     else:
-                        print("--- No EXTERNAL RAG context retrieved either. ---")
-            else:
-                # Use external RAG for general cybersecurity questions
-                print(f"\n--- Retrieving context from general knowledge base for query: '{user_query}' ---")
-                rag_context = retrieve_rag_context(user_query, config.DEFAULT_RAG_TOP_K)
-                if rag_context:
-                    print(f"--- Retrieved EXTERNAL RAG Context (first 100 chars): {rag_context[:100]}... ---")
+                        print("RAG components (embedding model or Pinecone) not available. Cannot load report data into Pinecone.")
+
                 else:
-                    print("--- No EXTERNAL RAG context retrieved. ---")
+                    print(f"Failed to parse {report_type.upper()} report. No data returned.")
+                    continue
+            except Exception as e:
+                print(f"An error occurred during parsing or loading into Pinecone: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+            # --- Generate Initial Summary and Remediation Steps ---
+            if current_parsed_report and llm_instance:
+                print("\n--- Generating initial report summary and remediation steps... ---")
+                initial_summary = summarize_report_with_llm(llm_instance, current_parsed_report, current_report_type)
+                print("\n--- Report Analysis ---")
+                print(initial_summary)
+                chat_history.append({"role": "assistant", "content": initial_summary})
+            else:
+                print("Could not generate initial summary. Parsed data or LLM not available.")
+                continue
+
+            # --- Interactive Chat Loop ---
+            print("\n--- You can now ask questions about the report or general cybersecurity topics. ---")
+            print("Type 'new_report' to upload another PDF, or 'exit' to quit.")
+
+            while True:
+                user_question = input("\nYour question: ").strip()
+                if user_question.lower() in ['exit', 'quit']:
+                    print("Exiting chat. Goodbye!")
+                    return
+                if user_question.lower() == 'new_report':
+                    reset_chat_context() 
+                    break
+
+                chat_history.append({"role": "user", "content": user_question})
+                print("Thinking...")
+
+                # --- Chat History Management (Sliding Window) ---
+                # Check if history needs summarization
+                if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
+                    print(f"--- Chat history exceeding {config.CHAT_HISTORY_MAX_TURNS} turns. Summarizing older segments. ---")
+                    
+                    # Determine the segment to summarize (all turns except the last N recent ones)
+                    segment_to_summarize = chat_history[0 : len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD]
+                    
+                    if segment_to_summarize:
+                        summarized_segment_text = summarize_chat_history_segment(llm_instance, segment_to_summarize)
+                        
+                        # Create a new, condensed chat history
+                        # This replaces the old segment with the summary and keeps the recent turns.
+                        new_chat_history = [
+                            {"role": "system", "content": f"Summary of previous conversation: {summarized_segment_text}"}
+                        ]
+                        # Append the recent turns that were not summarized
+                        new_chat_history.extend(chat_history[len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD:])
+                        
+                        # Update the global chat_history
+                        chat_history = new_chat_history
+                        print("--- Chat history summarized. ---")
+                    else:
+                        print("--- No segment to summarize based on threshold. ---")
+
+
+                llm_prompt_content = ""
+                rag_context = ""
+
+                # Determine question type and prepare context
+                if current_parsed_report and is_report_specific_question(user_question, current_parsed_report):
+                    print(" (Determined as report-specific question - attempting INTERNAL RAG)")
+                    if current_report_namespace and _embedding_model_instance and _pinecone_index_instance:
+                        rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+                        if rag_context:
+                            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
+                        else:
+                            llm_prompt_content += "No specific relevant information found in the current report for this query. "
+                            print(" (No INTERNAL RAG context found for report-specific question)")
+                    else:
+                        llm_prompt_content += "Internal RAG components not available or report not loaded into Pinecone. Answering based on initial summary and general knowledge.\n"
+                        print(" (Internal RAG not available for report-specific question)")
+                    
+                    llm_prompt_content += f"The user is asking a question related to the previously provided {current_report_type.upper()} security report."
+                    llm_prompt_content += " Please refer to the report's content and your previous summary to answer.\n"
+                else:
+                    print(" (Determined as general cybersecurity question - attempting EXTERNAL RAG)")
+                    if _embedding_model_instance and _pinecone_index_instance:
+                        rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") 
+                        if rag_context:
+                            llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
+                        else:
+                            llm_prompt_content += "No specific relevant information found in the knowledge base for this query. "
+                            print(" (No EXTERNAL RAG context found)")
+                    else:
+                        llm_prompt_content += "RAG components not loaded or initialized. Answering based on general knowledge and chat history.\n"
+                        print(" (RAG components not available for general question)")
+
+                # Combine chat history with new context/instruction for the LLM
+                # The chat_history list now potentially contains a 'system' summary message.
+                concatenated_prompt = ""
+                for msg in chat_history:
+                    # Format roles correctly for LLM, especially the new 'system' role
+                    if msg["role"] == "user":
+                        concatenated_prompt += f"User: {msg['content']}\n"
+                    elif msg["role"] == "assistant":
+                        concatenated_prompt += f"Assistant: {msg['content']}\n"
+                    elif msg["role"] == "system":
+                        concatenated_prompt += f"System: {msg['content']}\n" # Include system message for LLM
+                
+                final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
+
+                try:
+                    llm_response = generate_response(llm_instance, final_llm_prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
+                    
+                    print(f"\nBot: {llm_response}")
+                    chat_history.append({"role": "assistant", "content": llm_response})
+
+                except Exception as e:
+                    print(f"Error generating LLM response: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    if chat_history and chat_history[-1]["role"] == "user": # Ensure we pop user message if assistant failed
+                        chat_history.pop()
+
+    finally: # Ensure LLM model and Pinecone namespace are explicitly closed/deleted
+        try:
+            if current_report_namespace:
+                delete_report_namespace(current_report_namespace)
             
-            # --- Construct Prompt for LLM ---
-            messages_for_llm = []
-
-            # Add system instruction (persona)
-            messages_for_llm.append({
-                "role": "system",
-                "content": "You are a helpful cybersecurity assistant that specializes in analyzing Nmap, ZAP, SSLScan, and MobSF reports and answering questions based on them, as well as providing general cybersecurity knowledge. Provide concise and accurate answers."
-            })
-            
-            # Add RAG context if available (as a system message)
-            if rag_context:
-                messages_for_llm.append({"role": "system", "content": f"Relevant background information:\n{rag_context}"})
-
-            # Add recent chat history (including the current user query and any summarized history)
-            # Ensure the structure is correct for the LLM's chat completion API
-            for msg in chat_history:
-                # The 'chat_history' list now correctly contains 'user', 'assistant', and 'system' roles.
-                messages_for_llm.append({"role": msg["role"], "content": msg["content"]})
-            
-            # Print the full prompt being sent to the LLM for debugging
-            print("\n--- FULL PROMPT SENT TO LLM FOR DEBUGGING ---")
-            for msg in messages_for_llm:
-                print(f"{msg['role'].upper()}: {msg['content']}")
-            print("--- END FULL PROMPT ---")
-
-            # --- Generate Response from LLM ---
-            print("\n--- Generating response... ---")
-            llm_response_content = generate_response(llm_instance, messages_for_llm, config.DEFAULT_MAX_TOKENS)
-            
-            # Add assistant's response to chat history
-            chat_history.append({"role": "assistant", "content": llm_response_content})
-
-            print("\n--- Assistant's Response ---")
-            print(llm_response_content)
-
-        except KeyboardInterrupt:
-            print("\nExiting chat. Goodbye!")
-            break
+            if 'llm_instance' in globals() and llm_instance is not None:
+                print("\n--- Closing LLM model ---")
+                try:
+                    if hasattr(llm_instance, 'close') and callable(llm_instance.close):
+                        if hasattr(llm_instance, '_model') and llm_instance._model is not None:
+                            llm_instance.close()
+                            print("LLM model closed successfully.")
+                        else:
+                            print("LLM model already closed or invalid.")
+                    else:
+                        print("LLM model does not have a close method.")
+                except Exception as e:
+                    print(f"Error during explicit LLM model closing: {e}")
+                    import traceback
+                    traceback.print_exc()
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(f"Error during cleanup: {e}")
             import traceback
             traceback.print_exc()
-            print("Please try again or type 'new_report' to upload a different file.")
-            if chat_history and chat_history[-1]["role"] == "user": # Ensure we pop user message if assistant failed
-                    chat_history.pop()
+
 
 if __name__ == "__main__":
     try:
@@ -361,6 +658,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:
-        # Ensure cleanup happens even if there's an error during initial setup or main loop
+        # Ensure cleanup happens even if there's an error
         cleanup_llm()
         sys.exit(0)

@@ -1,10 +1,9 @@
 import json
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List
 import os
 import sys
 import dotenv
 import uuid
-import re
 
 # Load environment variables from a .env file (if present)
 dotenv.load_dotenv()
@@ -245,271 +244,506 @@ def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     
     return prompt
 
-def _format_mobsf_raw_text_summary_prompt(raw_text: str) -> str:
+def _format_mobsf_android_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
-    Crafts a detailed prompt for the LLM based on raw MobSF report text.
-    Instructs the LLM to summarize key findings directly from the provided text,
-    focusing on app security score, identified vulnerabilities, and platform-specific details.
+    Crafts a detailed prompt for the LLM based on MobSF parsed data.
+    Focuses on app information, security score, findings, and permissions.
     """
-    # Determine if it's an Android or iOS report based on keywords in the raw text
-    os_type = "Mobile" # Default
-    if re.search(r'ANDROID STATIC ANALYSIS REPORT', raw_text, re.IGNORECASE):
-        os_type = "Android"
-    elif re.search(r'IOS STATIC ANALYSIS REPORT', raw_text, re.IGNORECASE):
-        os_type = "iOS"
-
-    platform_specific_details = ""
-    if os_type == "Android":
-        platform_specific_details = "- **Dangerous Permissions:** Highlight any dangerous permissions requested by the application.\n"
-    elif os_type == "iOS":
-        platform_specific_details = "- **Insecure API Calls (iOS):** Highlight any insecure API calls or configurations specific to iOS.\n"
-    
     prompt = (
-        f"As a cybersecurity analyst, analyze the following MobSF {os_type} Static Analysis Report.\n"
-        "This report is provided as raw text because a structured parser is not available for it.\n"
-        "Your task is to read through the raw text and extract the most critical information:\n"
-        "- **Overall App Security Score and Grade.**\n"
-        "- **Findings Severity Summary:** Breakdown of High, Medium, Info, and Secure findings.\n"
-        "- **Key File and App Information:** Application name, package/identifier, file hashes.\n"
-        "- **Identified Vulnerabilities/Issues:** Any specific security vulnerabilities, weaknesses, or misconfigurations mentioned.\n"
-        f"{platform_specific_details}" # Dynamically added platform-specific line
-        "- **Certificate Information:** Details about the signing certificate, if available.\n"
-        "\n"
-        "Based on these extracted points, provide a concise high-level summary of the report's security posture.\n"
-        "Then, list significant findings or potential security implications.\n"
-        "Finally, suggest general remediation steps based on the type of issues commonly found in mobile security reports.\n\n"
-        "--- MobSF Raw Report Text ---\n"
-        f"{raw_text}\n\n"
-        "Consider the above MobSF raw report text. Generate a comprehensive summary, list key findings, and propose actionable remediation steps.\n"
-        "Focus only on information present in the provided text and keep the response structured\n"
+        "As a cybersecurity analyst, analyze the following Mobile Security Framework (MobSF) report "
+        "and provide:\n"
+        "1. A concise summary of the application analysis, including app name, package, version, and overall security score.\n"
+        "2. Key findings, focusing on high and medium severity issues, and abused permissions.\n"
+        "3. Potential security implications for any identified weaknesses.\n"
+        "4. Actionable remediation steps for the identified issues.\n"
+        "The report data is in JSON format. Prioritize critical and high-risk information. "
+        "Do not invent information not present in the report.\n\n"
+        "--- MobSF Report Data ---\n"
     )
+
+    # Add scan metadata
+    metadata = parsed_data.get("scan_metadata", {})
+    prompt += f"Tool: {metadata.get('tool', 'N/A')}\n"
+    prompt += f"Report ID: {metadata.get('report_id', 'N/A')}\n"
+    prompt += f"Scan Date: {metadata.get('scan_date', 'N/A')}\n"
+    prompt += f"MobSF Version: {metadata.get('mobsf_version', 'N/A')}\n"
+    prompt += f"App Security Score: {metadata.get('app_security_score', 'N/A')}\n"
+    prompt += f"Grade: {metadata.get('grade', 'N/A')}\n\n"
+
+    # App Information
+    app_info = parsed_data.get("app_information", {})
+    file_info = parsed_data.get("file_information", {})
+    prompt += "App Information:\n"
+    prompt += f"  App Name: {app_info.get('App Name', 'N/A')}\n"
+    prompt += f"  Package Name: {app_info.get('Package Name', 'N/A')}\n"
+    prompt += f"  Android Version Name: {app_info.get('Android Version Name', 'N/A')}\n"
+    prompt += f"  MD5: {file_info.get('MD5', 'N/A')}\n"
+    prompt += f"  SHA1: {file_info.get('SHA1', 'N/A')}\n"
+    prompt += f"  SHA256: {file_info.get('SHA256', 'N/A')}\n\n"
+
+    # Summary of Findings
+    summary = parsed_data.get("summary", {})
+    findings_severity = summary.get("findings_severity", {})
+    prompt += "Summary of Findings:\n"
+    prompt += f"  Total Issues: {summary.get('total_issues', 0)}\n"
+    prompt += f"  High Severity: {findings_severity.get('High', 0)}\n"
+    prompt += f"  Medium Severity: {findings_severity.get('Medium', 0)}\n"
+    prompt += f"  Info Severity: {findings_severity.get('Info', 0)}\n"
+    prompt += f"  Secure Findings: {findings_severity.get('Secure', 0)}\n"
+    prompt += f"  Hotspot Findings: {findings_severity.get('Hotspot', 0)}\n\n"
+
+    # Detailed Findings (High & Medium)
+    all_findings = []
+    all_findings.extend(parsed_data.get("certificate_analysis_findings", []))
+    all_findings.extend(parsed_data.get("manifest_analysis_findings", []))
+    all_findings.extend(parsed_data.get("code_analysis_findings", []))
+
+    high_medium_findings = [f for f in all_findings if f.get('severity') in ['high', 'warning']] # Using 'high' and 'warning' based on provided JSON
+    
+    if high_medium_findings:
+        prompt += "Detailed High and Medium Severity Findings:\n"
+        for i, finding in enumerate(high_medium_findings):
+            prompt += f"  Finding {i+1}:\n"
+            prompt += f"    Title/Issue: {finding.get('title', finding.get('issue', 'N/A'))}\n"
+            prompt += f"    Description: {finding.get('description', 'N/A')}\n"
+            prompt += f"    Severity: {finding.get('severity', 'N/A')}\n"
+            if 'standards' in finding: # Specifically for code_analysis_findings
+                prompt += f"    Standards/CWE: {finding.get('standards', 'N/A')}\n"
+            if 'files' in finding: # Specifically for code_analysis_findings
+                prompt += f"    Files: {finding.get('files', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No High or Medium severity findings reported.\n\n"
+
+    # Abused Permissions
+    abused_permissions = parsed_data.get("abused_permissions_summary", {})
+    malware_permissions_section = abused_permissions.get("Malware Permissions", {})
+    
+    # Check if 'matches' is a string like "2/25" and extract the first number
+    matches_str = malware_permissions_section.get('matches', '0/0')
+    total_abused_permissions_count = 0
+    if isinstance(matches_str, str) and '/' in matches_str:
+        try:
+            total_abused_permissions_count = int(matches_str.split('/')[0])
+        except ValueError:
+            total_abused_permissions_count = 0
+
+    if total_abused_permissions_count > 0:
+        prompt += "Abused Permissions:\n"
+        prompt += f"  Matches: {matches_str}\n"
+        prompt += f"  Permissions: {', '.join(malware_permissions_section.get('permissions', []))}\n"
+        prompt += f"  Description: {malware_permissions_section.get('description', 'N/A')}\n\n"
+    else:
+        prompt += "No abused permissions detected as malware.\n\n"
+
+
+    prompt += "\n--- End MobSF Report Data ---\n"
+    prompt += "Please provide the summary, key findings, implications, and remediation steps based on the above. "
+    prompt += "Format your response with clear headings: 'Summary', 'Key Findings', 'Implications', 'Remediation Steps'."
+    
     return prompt
 
-
-def summarize_report_with_llm(llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str) -> str:
+def _format_mobsf_ios_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
-    Generates a summary of the provided structured security report using the LLM.
-    This function handles Nmap, ZAP, and SSLScan reports which provide parsed dictionary data.
-
-    Args:
-        llm_instance (Llama): The loaded LLM model instance.
-        parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
-        report_type (str): The type of the report ('nmap', 'zap', 'sslscan').
-
-    Returns:
-        str: A summary of the report.
+    Crafts a detailed prompt for the LLM based on MobSF iOS parsed data.
+    Focuses on app information, security score, and various security findings.
     """
-    prompt_formatter = None
-    if report_type == 'nmap':
-        prompt_formatter = _format_nmap_summary_prompt
-    elif report_type == 'zap':
-        prompt_formatter = _format_zap_summary_prompt
-    elif report_type == 'sslscan':
-        prompt_formatter = _format_sslscan_summary_prompt
-    else:
-        return f"Error: Unsupported structured report type '{report_type}' for summarization."
-
-    # Generate the specific prompt using the formatter
-    summary_prompt = prompt_formatter(parsed_data)
-    
-    # Generate response using the LLM
-    summary = generate_response(llm_instance, summary_prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
-    return summary
-
-def summarize_raw_text_report_with_llm(llm_instance: Llama, raw_text: str, report_type: str) -> str:
-    """
-    Generates a summary of a raw text security report (e.g., MobSF) using the LLM.
-
-    Args:
-        llm_instance (Llama): The loaded LLM model instance.
-        raw_text (str): The raw text content of the report.
-        report_type (str): The type of the report (e.g., 'mobsf').
-
-    Returns:
-        str: A summary of the report.
-    """
-    if report_type == 'mobsf':
-        summary_prompt = _format_mobsf_raw_text_summary_prompt(raw_text)
-    else:
-        return f"Error: Unsupported raw text report type '{report_type}' for summarization."
-    
-    # Generate response using the LLM
-    summary = generate_response(llm_instance, summary_prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
-    return summary
-
-
-def summarize_chat_history_segment(llm_instance: Llama, chat_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS) -> str:
-    """
-    Summarizes a segment of the chat history to condense it for the LLM's context window.
-
-    Args:
-        llm_instance (Llama): The loaded LLM model instance.
-        chat_segment (List[Dict[str, str]]): A list of chat messages (user/assistant) to summarize.
-        max_tokens (int): The maximum number of tokens for the summary.
-
-    Returns:
-        str: A concise summary of the chat segment.
-    """
-    if not chat_segment:
-        return "The previous conversation was brief."
-
-    # Format the chat segment into a single string for the LLM
-    formatted_segment = ""
-    for msg in chat_segment:
-        formatted_segment += f"{msg['role'].capitalize()}: {msg['content']}\n"
-
     prompt = (
-        "Condense the following conversation segment into a concise summary, focusing on the main topics discussed and any conclusions reached.\n"
-        "Ensure the summary captures key information from both user and assistant turns.\n\n"
-        f"Conversation Segment:\n{formatted_segment}\n\n"
-        "Concise Summary:"
+        "As a cybersecurity analyst, analyze the following Mobile Security Framework (MobSF) iOS report "
+        "and provide:\n"
+        "1. A concise summary of the application analysis, including app name, identifier, version, and overall security score.\n"
+        "2. Key findings, focusing on high and medium (warning) severity issues from binary code analysis and binary protection analysis.\n"
+        "3. Potential security implications for any identified weaknesses.\n"
+        "4. Actionable remediation steps for the identified issues.\n"
+        "The report data is in JSON format. Prioritize critical and high-risk information. "
+        "Do not invent information not present in the report.\n\n"
+        "--- MobSF iOS Report Data ---\n"
     )
 
-    try:
-        summary = generate_response(llm_instance, prompt, max_tokens=max_tokens)
-        return summary
-    except Exception as e:
-        print(f"Error summarizing chat history segment: {e}")
-        return "Could not summarize previous conversation."
+    # Add scan metadata
+    metadata = parsed_data.get("scan_metadata", {})
+    prompt += f"Tool: {metadata.get('tool', 'N/A')}\n"
+    prompt += f"Report ID: {metadata.get('report_id', 'N/A')}\n"
+    prompt += f"Scan Date: {metadata.get('scan_date', 'N/A')}\n"
+    prompt += f"MobSF Version: {metadata.get('mobsf_version', 'N/A')}\n"
+    prompt += f"App Security Score: {metadata.get('app_security_score', 'N/A')}\n"
+    prompt += f"Grade: {metadata.get('grade', 'N/A')}\n\n"
+
+    # App Information
+    app_info = parsed_data.get("app_information", {})
+    file_info = parsed_data.get("file_information", {})
+    prompt += "App Information:\n"
+    prompt += f"  App Name: {app_info.get('App Name', 'N/A')}\n"
+    prompt += f"  Identifier: {app_info.get('Identifier', 'N/A')}\n"
+    prompt += f"  App Type: {app_info.get('App Type', 'N/A')}\n"
+    prompt += f"  SDK Name: {app_info.get('SDK Name', 'N/A')}\n"
+    prompt += f"  Version: {app_info.get('Version', 'N/A')}\n"
+    prompt += f"  Build: {app_info.get('Build', 'N/A')}\n"
+    prompt += f"  Platform Version: {app_info.get('Platform Version', 'N/A')}\n"
+    prompt += f"  Min OS Version: {app_info.get('Min OS Version', 'N/A')}\n"
+    prompt += f"  Supported Platforms: {', '.join(app_info.get('Supported Platforms', ['N/A']))}\n\n"
+
+    # File Information
+    prompt += "File Information:\n"
+    prompt += f"  File Name: {file_info.get('File Name', 'N/A')}\n"
+    prompt += f"  Size: {file_info.get('Size', 'N/A')}\n"
+    prompt += f"  MD5: {file_info.get('MD5', 'N/A')}\n"
+    prompt += f"  SHA1: {file_info.get('SHA1', 'N/A')}\n"
+    prompt += f"  SHA256: {file_info.get('SHA256', 'N/A')}\n\n"
+
+    # Summary of Findings
+    summary = parsed_data.get("summary", {})
+    findings_severity = summary.get("findings_severity", {})
+    prompt += "Summary of Findings:\n"
+    prompt += f"  Total Issues: {summary.get('total_issues', 0)}\n"
+    prompt += f"  High Severity: {findings_severity.get('High', 0)}\n"
+    prompt += f"  Medium Severity: {findings_severity.get('Medium', 0)}\n"
+    prompt += f"  Info Severity: {findings_severity.get('Info', 0)}\n"
+    prompt += f"  Secure Findings: {findings_severity.get('Secure', 0)}\n"
+    prompt += f"  Hotspot Findings: {findings_severity.get('Hotspot', 0)}\n\n"
+
+    # IPA Binary Code Analysis Findings (High & Warning)
+    ipa_code_analysis = parsed_data.get("ipa_binary_code_analysis_findings", [])
+    high_warning_ipa_code_findings = [f for f in ipa_code_analysis if f.get('severity') in ['high', 'warning']]
+
+    if high_warning_ipa_code_findings:
+        prompt += "Detailed IPA Binary Code Analysis Findings (High and Warning Severity):\n"
+        for i, finding in enumerate(high_warning_ipa_code_findings):
+            prompt += f"  Finding {i+1}:\n"
+            prompt += f"    Issue: {finding.get('issue', 'N/A')}\n"
+            prompt += f"    Description: {finding.get('description', 'N/A')}\n"
+            prompt += f"    Severity: {finding.get('severity', 'N/A')}\n"
+            if 'standards' in finding:
+                standards = finding['standards']
+                prompt += f"    Standards:\n"
+                prompt += f"      CWE: {standards.get('CWE', 'N/A')}\n"
+                prompt += f"      OWASP Top 10: {standards.get('OWASP Top 10', 'N/A')}\n"
+                prompt += f"      OWASP MASVS: {standards.get('OWASP MASVS', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No High or Warning severity IPA Binary Code Analysis findings reported.\n\n"
+
+    # IPA Binary Analysis Findings (Protections)
+    ipa_binary_analysis = parsed_data.get("ipa_binary_analysis_findings", [])
+    if ipa_binary_analysis:
+        prompt += "IPA Binary Analysis (Protections):\n"
+        for i, finding in enumerate(ipa_binary_analysis):
+            prompt += f"  Protection {i+1}:\n"
+            prompt += f"    Protection: {finding.get('protection', 'N/A')}\n"
+            prompt += f"    Status: {finding.get('status', 'N/A')}\n"
+            prompt += f"    Severity: {finding.get('severity', 'N/A')}\n"
+            prompt += f"    Description: {finding.get('description', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No IPA Binary Analysis findings reported.\n\n"
+        
+    # App Transport Security Findings
+    ats_findings = parsed_data.get("app_transport_security_findings", [])
+    if ats_findings:
+        prompt += "App Transport Security (ATS) Findings:\n"
+        for i, finding in enumerate(ats_findings):
+            prompt += f"  ATS Finding {i+1}:\n"
+            prompt += f"    Issue: {finding.get('issue', 'N/A')}\n"
+            prompt += f"    Severity: {finding.get('severity', 'N/A')}\n"
+            prompt += f"    Description: {finding.get('description', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No App Transport Security (ATS) findings reported.\n\n"
+
+    # OFAC Sanctioned Countries
+    ofac_countries = parsed_data.get("ofac_sanctioned_countries", [])
+    if ofac_countries:
+        prompt += "OFAC Sanctioned Countries:\n"
+        for i, country_data in enumerate(ofac_countries):
+            prompt += f"  Country {i+1}:\n"
+            prompt += f"    Domain: {country_data.get('domain', 'N/A')}\n"
+            prompt += f"    Country/Region: {country_data.get('country_region', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No OFAC Sanctioned Countries detected.\n\n"
+
+    # Domain Malware Check
+    domain_malware_check = parsed_data.get("domain_malware_check", [])
+    if domain_malware_check:
+        prompt += "Domain Malware Check:\n"
+        for i, domain_data in enumerate(domain_malware_check):
+            prompt += f"  Domain {i+1}:\n"
+            prompt += f"    Domain: {domain_data.get('domain', 'N/A')}\n"
+            prompt += f"    Status: {domain_data.get('status', 'N/A')}\n"
+            if domain_data.get('geolocation'):
+                geo = domain_data['geolocation']
+                prompt += f"    Geolocation:\n"
+                prompt += f"      IP: {geo.get('IP', 'N/A')}\n"
+                prompt += f"      Country: {geo.get('Country', 'N/A')}\n"
+                prompt += f"      Region: {geo.get('Region', 'N/A')}\n"
+                prompt += f"      City: {geo.get('City', 'N/A')}\n"
+                prompt += f"      Latitude: {geo.get('Latitude', 'N/A')}\n"
+                prompt += f"      Longitude: {geo.get('Longitude', 'N/A')}\n"
+            prompt += "\n"
+    else:
+        prompt += "No Domain Malware Check findings reported.\n\n"
+
+    # Scan Logs (optional, depending on verbosity desired for LLM)
+    scan_logs = parsed_data.get("scan_logs", [])
+    if scan_logs:
+        prompt += "Scan Logs (Recent Entries):\n"
+        for i, log_entry in enumerate(scan_logs[-5:]): # Last 5 entries
+            prompt += f"  Log {i+1}: Timestamp={log_entry.get('timestamp', 'N/A')}, Event={log_entry.get('event', 'N/A')}, Error={log_entry.get('error', 'N/A')}\n"
+        prompt += "\n"
 
 
-if __name__ == "__main__":
-    # Dummy generate_response for testing purposes if LLM is not actually loaded
-    _original_generate_response = generate_response
+    prompt += "\n--- End MobSF iOS Report Data ---\n"
+    prompt += "Please provide the summary, key findings, implications, and remediation steps based on the above. "
+    prompt += "Format your response with clear headings: 'Summary', 'Key Findings', 'Implications', 'Remediation Steps'."
     
-    def dummy_generate_response(llm_instance_dummy, prompt_text, max_tokens):
-        print(f"\n--- Dummy LLM Call (Max Tokens: {max_tokens}) ---\nPrompt starts with: {prompt_text[:200]}...")
-        if "nmap" in prompt_text.lower() and "report data" in prompt_text.lower():
-            return "Dummy Nmap Summary: Scanned hosts, found some open ports and OS details."
-        elif "zap" in prompt_text.lower() and "report data" in prompt_text.lower():
-            return "Dummy ZAP Summary: Identified several web vulnerabilities, including a high-risk SQL Injection."
-        elif "sslscan" in prompt_text.lower() and "report data" in prompt_text.lower():
-            return "Dummy SSLScan Summary: Analyzed SSL/TLS configurations, found weak protocols and an expired certificate."
-        elif "mobsf raw report text" in prompt_text.lower():
-            return "Dummy MobSF Summary: Reviewed mobile application. Overall low risk, but noted some excessive permissions and an outdated SDK."
-        elif "conversation segment" in prompt_text.lower():
-            return "Dummy Chat History Summary: User asked about X, bot explained Y and Z."
-        return "Dummy LLM Response."
+    return prompt
 
-    # Override generate_response for testing
-    generate_response = dummy_generate_response
+def summarize_report_with_llm(
+    llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str
+) -> str:
+    """
+    Generates a natural language summary and remediation steps for a parsed security report
+    using the local LLM.
 
-    # Dummy LLM instance for testing (not a real Llama instance)
-    class DummyLLMInstance:
-        def __init__(self):
-            print("Dummy LLM instance created for testing summarizer.")
-        def create_chat_completion(self, *args, **kwargs):
-            return {"choices": [{"message": {"content": "Dummy response from chat completion."}}]}
+    Args:
+        llm_instance (Llama): The loaded Llama model instance.
+        parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
+        report_type (str): The type of the report ("nmap", "zap", or "sslscan").
 
-    dummy_llm_instance = DummyLLMInstance()
+    Returns:
+        str: The generated explanation and remediation steps from the LLM.
+    """
+    if report_type.lower() == "nmap":
+        prompt = _format_nmap_summary_prompt(parsed_data)
+    elif report_type.lower() == "zap":
+        prompt = _format_zap_summary_prompt(parsed_data)
+    elif report_type.lower() == "sslscan": # New condition for SSLScan
+        prompt = _format_sslscan_summary_prompt(parsed_data)
+    elif report_type.lower() == "mobsf_android": # New condition for SSLScan
+        prompt = _format_mobsf_android_summary_prompt(parsed_data)
+    elif report_type.lower() == "mobsf_ios": # New condition for SSLScan
+        prompt = _format_mobsf_ios_summary_prompt(parsed_data)
+    else:
+        return "Error: Unsupported report type for summarization. Please specify 'nmap', 'zap', or 'sslscan'."
+
+    print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
+
+    try:
+        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
+        return llm_response
+    except Exception as e:
+        return f"Error generating LLM response: {e}"
+
+
+def summarize_chat_history_segment(
+    llm_instance: Any, history_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
+) -> str:
+    """
+    Uses the LLM to summarize a segment of the chat history.
+
+    Args:
+        llm_instance (Any): The loaded Llama model instance.
+        history_segment (List[Dict[str, str]]): A list of message dictionaries
+                                                 (e.g., [{'role': 'user', 'content': '...'}, ...]).
+        max_tokens (int): Maximum tokens for the summary.
+
+    Returns:
+        str: A concise summary of the conversation segment.
+    """
+    if not history_segment:
+        return ""
+
+    # Construct the prompt for summarization
+    summarization_prompt = (
+        "Please summarize the following conversation history concisely. "
+        "Focus on the main topics discussed and any key questions or conclusions.\n\n"
+        "--- Conversation History to Summarize ---\n"
+    )
+    
+    # Concatenate the history segment into a string for the LLM
+    for msg in history_segment:
+        summarization_prompt += f"{msg['role'].capitalize()}: {msg['content']}\n"
+    
+    summarization_prompt += "--- End Conversation History ---\n\nSummary:"
+
+    print(f"\n--- Sending chat history segment to LLM for summarization (length: {len(summarization_prompt)} chars) ---")
+
+    try:
+        # Call generate_response with the summarization prompt
+        # We enforce a smaller max_tokens for summarization to keep it concise
+        summary_response = generate_response(llm_instance, summarization_prompt, max_tokens=max_tokens)
+        return summary_response.strip()
+    except Exception as e:
+        print(f"Error generating history summary: {e}")
+        return "(Error summarizing previous conversation. Some context may be lost.)"
+
+
+# Example usage (for testing summarizer.py directly if needed)
+if __name__ == "__main__":
+    print("--- Testing summarizer.py directly ---")
+    # This requires a dummy local_llm and parsed data.
+    # In a real run, main.py will handle loading and parsing.
+
+    # Mock LLM instance for local testing without actual model download/load
+    class MockLlama:
+        def create_chat_completion(self, messages, max_tokens, temperature, stop):
+            # For simplicity, mock the chat completion response
+            full_prompt = messages[0]['content'] if messages else ""
+            if "summarize the following conversation history" in full_prompt.lower():
+                return {"choices": [{"message": {"content": "Mocked summary of the conversation history."}}]}
+            elif "Nmap Report Data" in full_prompt:
+                 return {"choices": [{"message": {"content": "Mocked Nmap report summary."}}]}
+            elif "ZAP Report Data" in full_prompt:
+                 return {"choices": [{"message": {"content": "Mocked ZAP report summary."}}]}
+            elif "SSLScan Report Data" in full_prompt: # New mock response for SSLScan
+                return {"choices": [{"message": {"content": "Mocked SSLScan report summary."}}]}
+            elif "Mobsf Android Report Data" in full_prompt: # New mock response for SSLScan
+                return {"choices": [{"message": {"content": "Mocked Mobsf Android report summary."}}]}
+            else:
+                return {"choices": [{"message": {"content": "Mocked LLM response."}}]}
+
+    # Override generate_response for this test block
+    _original_generate_response = generate_response
+    def generate_response(llm_instance, prompt, max_tokens=256, temperature=0.7, stop=["</s>"]):
+        return llm_instance.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop
+        )["choices"][0]["message"]["content"]
+
+    dummy_llm_instance = MockLlama()
+    print("Using Mock LLM for summarizer test.")
+
+
+    # Dummy Nmap parsed data
+    dummy_nmap_data = {
+        "scan_metadata": {
+            "scan_initiated_by": "User",
+            "timestamp": "Fri Jun 18 10:00:00 2025 IST",
+            "target": "example.com (192.168.1.1)",
+            "nmap_version": "7.92",
+            "scan_type": "Port Scan",
+            "scan_duration": "10.5 seconds"
+        },
+        "hosts": [
+            {
+                "ip_address": "192.168.1.1",
+                "hostname": "example.com",
+                "status": "up",
+                "latency": "0.002s",
+                "os_detection": {
+                    "os_guesses": ["Linux 3.10 - 4.11"],
+                    "device_type": ["general purpose"]
+                },
+                "ports": [
+                    {
+                        "port_id": 22, "protocol": "tcp", "state": "open", "service": "ssh",
+                        "version": "OpenSSH 7.6p1 Ubuntu 4ubuntu0.3 (Ubuntu Linux; protocol 2.0)",
+                        "script_outputs": {"ssh-hostkey": "2048 SHA256:abcd... (RSA)"}
+                    },
+                    {
+                        "port_id": 80, "protocol": "tcp", "state": "open", "service": "http",
+                        "version": "Apache httpd 2.4.29 ((Ubuntu))",
+                        "script_outputs": {"http-title": "Apache2 Ubuntu Default Page"}
+                    }
+                ]
+            }
+        ]
+    }
+
+    # Dummy ZAP parsed data
+    dummy_zap_data = {
+        "scan_metadata": {
+            "tool": "Checkmarx ZAP Report",
+            "report_id": "12345-abcde",
+            "generated_at": "2025-06-18T10:05:00",
+            "site": "http://testphp.vulnweb.com",
+            "zap_version": "2.10.0"
+        },
+        "summary": {
+            "risk_counts": {"High": 1, "Medium": 2, "Low": 3, "Informational": 5, "False Positives": 0},
+            "total_alerts": 11
+        },
+        "vulnerabilities": [
+            {
+                "name": "SQL Injection", "risk": "High",
+                "description": "SQL Injection vulnerability found in parameter 'id'.",
+                "urls": [{"url": "http://testphp.vulnweb.com/listproducts.php?cat=1", "method": "GET", "parameter": "id", "attack": "id=1'%20OR%201=1--", "evidence": "Error message with SQL syntax"}],
+                "solution": "Use parameterized queries or prepared statements.",
+                "references": ["https://owasp.org/www-community/attacks/SQL_Injection"],
+                "cwe_id": 89
+            },
+            {
+                "name": "Cross Site Scripting (XSS)", "risk": "Medium",
+                "description": "Reflected XSS vulnerability identified.",
+                "urls": [{"url": "http://testphp.vulnweb.com/search.php?test=1", "method": "GET", "parameter": "test", "attack": "<script>alert(1)</script>", "evidence": "Reflected script in response"}],
+                "solution": "Implement proper input validation and output encoding.",
+                "references": ["https://owasp.org/www-community/attacks/xss/"],
+                "cwe_id": 79
+            }
+        ]
+    }
+
+    # Dummy SSLScan parsed data
+    dummy_sslscan_data = {
+        "scan_metadata": {
+            "tool": "SSLScan Report",
+            "initiated_by": "Maaz",
+            "timestamp": "2025-04-19 12:29:21",
+            "target_host": "hackthissite.org",
+            "tool_version": "2.1.5",
+            "openssl_version": "3.4.0",
+            "connected_ip": "137.74.187.102",
+            "tested_server": "hackthissite.org",
+            "tested_port": 443,
+            "sni_name": "hackthissite.org"
+        },
+        "protocols": [
+            {"name": "SSLv2", "status": "disabled"},
+            {"name": "SSLv3", "status": "disabled"},
+            {"name": "TLSv1.2", "status": "enabled"},
+            {"name": "TLSv1.3", "status": "disabled"}
+        ],
+        "security_features": {
+            "tls_fallback_scsv": "Server supports TLS Fallback SCSV",
+            "tls_renegotiation": "Session renegotiation not supported",
+            "tls_compression": "Compression disabled",
+            "heartbleed": ["TLSv1.2 not vulnerable to heartbleed"]
+        },
+        "supported_ciphers": [
+            {"status": "Preferred", "tls_version": "TLSv1.2", "bits": 256, "name": "ECDHE-RSA-AES256-GCM-SHA384", "curve": "P-256", "dhe_bits": 256}
+        ],
+        "key_exchange_groups": [
+            {"tls_version": "TLSv1.2", "bits": 128, "name": "secp256r1", "details": "NIST P-256"}
+        ],
+        "ssl_certificate": {
+            "signature_algorithm": "sha256WithRSAEncryption",
+            "rsa_key_strength": 4096,
+            "subject": "hackthisjogneh42n5o7gbzrewxee3vyu6ex37ukyvdw6jm66npakiyd.onion",
+            "altnames": ["DNS: hackthissite.org", "DNS:www.hackthissite.org"],
+            "issuer": "HARICA DV TLS RSA",
+            "not_valid_before": "Mar 25 04:43:22 2025 GMT",
+            "not_valid_after": "Mar 25 04:43:22 2026 GMT"
+        }
+    }
+
 
     if dummy_llm_instance:
-        print("\n--- Testing Report Summarization ---")
-
-        # Test Nmap summary
-        dummy_nmap_data = {
-            "scan_metadata": {"target": "example.com", "scan_type": "SYN Scan", "scan_start": "2025-01-01", "nmap_version": "7.92"},
-            "hosts": [
-                {"ip_address": "192.168.1.1", "hostname": "host1.example.com",
-                 "os_detection": {"os_match": [{"name": "Linux 2.6.32", "accuracy": 90}]},
-                 "ports": [{"port_id": "80", "protocol": "tcp", "state": "open", "service": "http", "version": "nginx 1.18.0"}]}
-            ]
-        }
+        print("\n--- Testing with Nmap Report ---")
         nmap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_nmap_data, "nmap")
         print("Generated Nmap Summary:")
         print(nmap_summary)
 
-        # Test ZAP summary
-        dummy_zap_data = {
-            "scan_metadata": {"tool": "ZAP", "report_id": "123", "generated_at": "2025-01-01", "site": "https://example.com", "zap_version": "2.10.0"},
-            "summary": {"risk_counts": {"High": 1, "Medium": 2, "Low": 5, "Informational": 3, "False Positives": 0}},
-            "vulnerabilities": [
-                {"name": "SQL Injection", "risk": "High", "description": "SQL injection vulnerability found.", "cwe_id": "89", "urls": [{"url": "https://example.com/login"}]},
-                {"name": "Cross Site Scripting", "risk": "Medium", "description": "XSS vulnerability.", "cwe_id": "79", "urls": [{"url": "https://example.com/search"}]}
-            ]
-        }
+        print("\n--- Testing with ZAP Report ---")
         zap_summary = summarize_report_with_llm(dummy_llm_instance, dummy_zap_data, "zap")
         print("Generated ZAP Summary:")
         print(zap_summary)
-
-        # Test SSLScan summary
-        dummy_sslscan_data = {
-            "scan_metadata": {"tool": "SSLScan", "target_host": "secure.example.com", "connected_ip": "1.2.3.4", "scan_time": "2025-01-01T10:00:00Z"},
-            "protocols": [{"name": "TLSv1.0", "status": "enabled", "info": "weak"}],
-            "supported_ciphers": [{"name": "TLS_RSA_WITH_RC4_128_SHA", "key_exchange": "RSA", "bits": "128", "status": "weak"}],
-            "ssl_certificate": {"subject": "CN=secure.example.com", "issuer": "O=Example CA", "valid_from": "2024-01-01", "valid_to": "2025-01-01", "signature_algorithm": "SHA256WithRSA"}
-        }
+        
+        print("\n--- Testing with SSLScan Report ---") # New test call
         sslscan_summary = summarize_report_with_llm(dummy_llm_instance, dummy_sslscan_data, "sslscan")
         print("Generated SSLScan Summary:")
         print(sslscan_summary)
-
-        # Test MobSF raw text summary (NEW function call)
-        dummy_mobsf_raw_data = """
---- PAGE 1 ---
-
-MOBSF
-
-ANDROID STATIC ANALYSIS REPORT
-
-TESTDROID
-CLOUD
-
-BitbarSampleApp (1.0)
-
-App Security Score:
-Grade:
-
-32/100 (HIGH RISK)
-C
-
---- PAGE 3 ---
-
-FINDINGS SEVERITY
-
-HIGH
-
-4
-
-MEDIUM
-
-3
-
-INFO
-
-2
-
-SECURE
-
-0
-
-FILE INFORMATION
-File Name: bitbar-sample-app.apk
-Size: 0.11MB
-MD5: 00cc5435151aa38a091781922c0390a4
-
-APP INFORMATION
-App Name: BitbarSampleApp
-Package Name: com.bitbar.testdroid
-Target SDK: 33
-Min SDK: 21
-
-CODE ANALYSIS
-Issue: Insecure Communication
-Severity: High
-Files: ['com.bitbar.testdroid. SomeClass.java']
-
-Issue: Hardcoded Secrets
-Severity: Medium
-Files: ['com.bitbar.testdroid. AnotherClass.java']
-
-APPLICATION PERMISSIONS
-PERMISSION,STATUS,INFO,DESCRIPTION
-android.permission.INTERNET,dangerous,Signature|System,Allows applications to open network sockets.
-android.permission.READ_EXTERNAL_STORAGE,dangerous,Signature,Allows an application to read from external storage.
-"""
-        mobsf_summary = summarize_raw_text_report_with_llm(dummy_llm_instance, dummy_mobsf_raw_data, "mobsf")
-        print("Generated MobSF Summary (using new raw text function):")
-        print(mobsf_summary)
 
         # Test summarize_chat_history_segment
         print("\n--- Testing chat history summarization ---")
@@ -536,3 +770,4 @@ android.permission.READ_EXTERNAL_STORAGE,dangerous,Signature,Allows an applicati
     
     # Restore original generate_response after testing
     generate_response = _original_generate_response
+

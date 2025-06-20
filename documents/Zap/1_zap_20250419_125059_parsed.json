@@ -1,7 +1,7 @@
 {
   "scan_metadata": {
     "tool": "Checkmarx ZAP Report",
-    "report_id": "64d99571-0357-4388-b448-30c7a5d2a15f",
+    "report_id": "210c8dbd-9869-4097-a838-8f5e75c70e3d",
     "generated_at": "2025-04-19T12:52:55",
     "site": "https://www.example.com",
     "zap_version": "2.16.0"
@@ -48,7 +48,7 @@
   },
   "vulnerabilities": [
     {
-      "id": "c5bc5198-708a-4856-b386-cf1dbd127c3f",
+      "id": "4bbeda70-5021-4596-aa60-110c947eb9c2",
       "name": "Content Security Policy (CSP) Header Not Set",
       "risk": "Medium",
       "description": "Content Security Policy (CSP) is an added layer of security that helps to detect and mitigate certain types of attacks, including Cross Site Scripting (XSS) and data injection attacks. These attacks are used for everything from data theft to site defacement or distribution of malware. CSP provides a set of standard HTTP headers that allow website owners to declare approved sources of content that browsers should be allowed to load on that page \u2014 covered types are JavaScript, CSS, HTML frames, fonts, images and embeddable objects such as Java applets, ActiveX, audio and video files.",
@@ -69,7 +69,7 @@
       "plugin_id": 10038
     },
     {
-      "id": "349ac4b0-d0b0-4640-a0da-203247495ec0",
+      "id": "d9a576bb-ba7e-4775-8cee-1fdf1c32da69",
       "name": "Missing Anti-clickjacking Header",
       "risk": "Medium",
       "description": "The response does not protect against 'ClickJacking' attacks. It should include either Content-Security-Policy with 'frame-ancestors' directive or X-Frame-Options.",
@@ -84,7 +84,7 @@
       "plugin_id": 10020
     },
     {
-      "id": "ace69d6e-7de1-4530-9102-91fb2ec5d619",
+      "id": "2ba5d9fb-1bbe-4a37-87ad-b2287ba387e9",
       "name": "Strict-Transport-Security Header Not Set",
       "risk": "Low",
       "description": "HTTP Strict Transport Security (HSTS) is a web security policy mechanism whereby a web server declares that complying user agents (such as a web browser) are to interact with it using only secure HTTPS connections (i.e. HTTP layered over TLS/SSL). HSTS is an IETF standards track protocol and is specified in RFC 6797.",
@@ -103,7 +103,7 @@
       "plugin_id": 10035
     },
     {
-      "id": "7d34b4e1-c014-40bc-acda-b0f1db87aaa2",
+      "id": "49670bc0-7cc5-45f2-a6da-eab96d554036",
       "name": "X-Content-Type-Options Header Missing",
       "risk": "Low",
       "description": "The Anti-MIME-Sniffing header X-Content-Type-Options was not set to 'nosniff'. This allows older versions of Internet Explorer and Chrome to perform MIME-sniffing on the response body, potentially causing the response body to be interpreted and displayed as a content type other than the declared content type. Current (early 2014) and legacy versions of Firefox will use the declared content type (if one is set), rather than performing MIME-sniffing.",
@@ -119,7 +119,7 @@
       "plugin_id": 10021
     },
     {
-      "id": "f0eb8485-a182-4937-be45-38612b7807b2",
+      "id": "03ed5a26-131a-49e6-a075-497971c029bf",
       "name": "Re-examine Cache-control Directives",
       "risk": "Informational",
       "description": "The cache-control header has not been set properly or is missing, allowing the browser and proxies to cache content. For static assets like css, js, or image files this might be intended, however, the resources should be reviewed to ensure that no sensitive content will be cached.",

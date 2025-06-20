@@ -32,12 +32,15 @@ def load_model(model_id: str, model_basename: str, local_dir: str = "models") ->
     else:
         print(f"Model found locally at {model_path}.")
 
+    num_cpu_threads = os.cpu_count() or 4
     # Initialize and return a llama_cpp.Llama instance 
     # Adjust n_ctx and n_gpu_layers as needed for your system
     model = Llama(
         model_path=model_path,
         n_ctx=4096,      # Context window size 
         n_gpu_layers=20, # Offload all layers to GPU if available. Set to 0 for CPU only. 
+        n_threads=num_cpu_threads, # Number of CPU threads to use
+        f16_kv=True, # Use half-precision for key-value cache
         verbose=False    # Set to True for more loading details
     )
     print("Language model loaded successfully.")
