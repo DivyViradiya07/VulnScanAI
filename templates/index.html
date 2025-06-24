@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VulnScanAI Chatbot</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6; /* Light gray background */
+        }
+        .chat-message.user {
+            background-color: #d1e7dd; /* Light green for user messages */
+            color: #0f5132; /* Dark green text */
+            border-bottom-left-radius: 0.75rem; /* Rounded corners */
+        }
+        .chat-message.bot {
+            background-color: #e2e8f0; /* Light blue-gray for bot messages */
+            color: #2d3748; /* Dark text */
+            border-bottom-right-radius: 0.75rem; /* Rounded corners */
+        }
+        .scrollable-chat {
+            max-height: calc(100vh - 220px); /* Adjust based on header/footer height */
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+        /* Custom scrollbar */
+        .scrollable-chat::-webkit-scrollbar {
+            width: 8px;
+        }
+        .scrollable-chat::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .scrollable-chat::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .scrollable-chat::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen bg-gray-100">
+    <!-- Header -->
+    <header class="bg-gradient-to-r from-blue-600 to-indigo-700 text-white p-4 shadow-lg">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-3xl font-bold tracking-tight">VulnScanAI Chatbot</h1>
+            <button id="clearChatBtn" class="bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition-all duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-opacity-75">
+                Clear Chat & New Report
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-grow container mx-auto p-6 flex flex-col lg:flex-row gap-6">
+        <!-- Left Pane: Report Upload -->
+        <section class="lg:w-1/3 p-6 bg-white rounded-xl shadow-lg flex flex-col justify-between">
+            <div>
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4">Upload Security Report (PDF)</h2>
+                <div class="mb-4">
+                    <label for="pdfFile" class="block text-sm font-medium text-gray-700 mb-2">Select a PDF file:</label>
+                    <input type="file" id="pdfFile" accept=".pdf" class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 transition duration-150 ease-in-out">
+                </div>
+                <button id="uploadBtn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-75 flex items-center justify-center">
+                    <svg id="uploadSpinner" class="animate-spin h-5 w-5 text-white mr-3 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Upload Report</span>
+                </button>
+                <div id="uploadStatus" class="mt-4 text-sm text-center font-medium"></div>
+            </div>
+            
+            <div id="summaryDisplay" class="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 overflow-auto text-sm text-gray-700 leading-relaxed max-h-64 resize-y hidden">
+                <h3 class="font-semibold text-gray-800 mb-2">Initial Report Summary:</h3>
+                <pre class="whitespace-pre-wrap font-sans"></pre>
+            </div>
+        </section>
+
+        <!-- Right Pane: Chat Interface -->
+        <section class="lg:w-2/3 p-6 bg-white rounded-xl shadow-lg flex flex-col">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">Chat with AI</h2>
+            <div id="chatMessages" class="scrollable-chat flex-grow mb-4 p-3 border border-gray-200 rounded-lg bg-gray-50">
+                <!-- Chat messages will be appended here -->
+                <div class="chat-message bot p-3 rounded-lg max-w-[85%] mb-2 shadow-sm">
+                    Hello! Please upload a security report PDF to get started, or ask a general cybersecurity question.
+                </div>
+            </div>
+            <div class="flex items-center space-x-3">
+                <input type="text" id="chatInput" placeholder="Ask a question..." class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-150 ease-in-out shadow-sm disabled:bg-gray-100 disabled:cursor-not-allowed" disabled>
+                <button id="sendBtn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-5 rounded-lg shadow-md transition-all duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75 flex items-center justify-center" disabled>
+                    <svg id="chatSpinner" class="animate-spin h-5 w-5 text-white mr-3 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Send</span>
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <footer class="bg-gray-800 text-white text-center p-4 mt-6 shadow-inner">
+        <p>&copy; 2025 VulnScanAI Chatbot. All rights reserved.</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
