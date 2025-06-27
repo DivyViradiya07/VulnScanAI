@@ -1001,6 +1001,152 @@ def _chunk_mobsf_ios_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
 
     return chunks
 
+def _chunk_nikto_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extracts meaningful text chunks from parsed Nikto report data, with increased granularity.
+    Each chunk represents a specific detail or finding from the report,
+    along with metadata.
+    """
+    chunks = []
+    
+    # Get common data to avoid repetitive lookups
+    host_details = parsed_data.get("host_details", {})
+    scan_summary = parsed_data.get("scan_summary", {})
+    scan_metadata = parsed_data.get("scan_metadata", {})
+
+    # Chunk 1: General Scan Metadata (from scan_metadata and high-level host info)
+    chunks.append({
+        "text": (
+            f"Nikto Scan Initiated: Tool '{scan_metadata.get('tool', 'N/A')}' "
+            f"on target host '{host_details.get('hostname', 'N/A')}' "
+            f"({host_details.get('ip', 'N/A')}:{host_details.get('port', 'N/A')})."
+        ),
+        "id_suffix": "nikto_scan_initiation"
+    })
+
+    # Chunk 2: Target Hostname
+    if host_details.get('hostname'):
+        chunks.append({
+            "text": f"Target Hostname: {host_details['hostname']}",
+            "id_suffix": "nikto_target_hostname"
+        })
+
+    # Chunk 3: Target IP
+    if host_details.get('ip'):
+        chunks.append({
+            "text": f"Target IP: {host_details['ip']}",
+            "id_suffix": "nikto_target_ip"
+        })
+
+    # Chunk 4: Target Port
+    if host_details.get('port') is not None: # Port can be 0 or other valid numbers
+        chunks.append({
+            "text": f"Target Port: {host_details['port']}",
+            "id_suffix": "nikto_target_port"
+        })
+    
+    # Chunk 5: HTTP Server
+    if host_details.get('http_server'):
+        chunks.append({
+            "text": f"HTTP Server identified as: {host_details['http_server']}",
+            "id_suffix": "nikto_http_server"
+        })
+
+    # Chunk 6: Site Link (Name)
+    if host_details.get('site_link_name'):
+        chunks.append({
+            "text": f"Site Link (Hostname): {host_details['site_link_name']}",
+            "id_suffix": "nikto_site_link_name"
+        })
+
+    # Chunk 7: Site Link (IP)
+    if host_details.get('site_link_ip'):
+        chunks.append({
+            "text": f"Site Link (IP Address): {host_details['site_link_ip']}",
+            "id_suffix": "nikto_site_link_ip"
+        })
+
+    # Chunk 8: Host Summary Statistics
+    statistics = host_details.get("statistics", {})
+    if statistics:
+        chunks.append({
+            "text": (
+                f"Host Summary Statistics: {statistics.get('requests', 'N/A')} requests, "
+                f"{statistics.get('errors', 'N/A')} errors, "
+                f"and {statistics.get('findings', 'N/A')} findings."
+            ),
+            "id_suffix": "nikto_host_statistics"
+        })
+
+    # Chunk 9: Individual Findings (each as a separate chunk)
+    findings = parsed_data.get("findings", [])
+    if findings:
+        for i, finding in enumerate(findings):
+            finding_text = (
+                f"Nikto Finding {i + 1}: URI '{finding.get('uri', 'N/A')}' "
+                f"(Method: {finding.get('http_method', 'N/A')}). "
+                f"Description: {finding.get('description', 'N/A')}. "
+            )
+            if finding.get('test_links'):
+                finding_text += f"Test Links: {', '.join(finding['test_links'])}. "
+            if finding.get('references'):
+                # Handle references that might be split across lines in original text
+                refs = [ref.strip() for ref in finding['references'] if ref.strip()]
+                if refs:
+                    finding_text += f"References: {', '.join(refs)}. "
+            
+            chunks.append({
+                "text": finding_text.strip(),
+                "id_suffix": f"nikto_finding_{i+1}"
+            })
+
+    # Chunk 10: Scan Summary - Software
+    if scan_summary.get('software'):
+        chunks.append({
+            "text": f"Nikto Scan Software: {scan_summary['software']}",
+            "id_suffix": "nikto_scan_software"
+        })
+
+    # Chunk 11: Scan Summary - CLI Options
+    cli_options = scan_summary.get('cli_options', '').strip()
+    if cli_options and cli_options != "N/A":
+        # Keep as-is, assuming detailed CLI options are useful as a single block
+        chunks.append({
+            "text": f"Nikto CLI Options used: {cli_options}",
+            "id_suffix": "nikto_cli_options"
+        })
+
+    # Chunk 12: Scan Summary - Hosts Tested
+    if scan_summary.get('hosts_tested') is not None:
+        chunks.append({
+            "text": f"Nikto Scan Hosts Tested: {scan_summary['hosts_tested']}",
+            "id_suffix": "nikto_scan_hosts_tested"
+        })
+    
+    # Chunk 13: Scan Summary - Start Time
+    if scan_summary.get('start_time'):
+        chunks.append({
+            "text": f"Nikto Scan Start Time: {scan_summary['start_time']}",
+            "id_suffix": "nikto_scan_start_time"
+        })
+
+    # Chunk 14: Scan Summary - End Time
+    if scan_summary.get('end_time'):
+        chunks.append({
+            "text": f"Nikto Scan End Time: {scan_summary['end_time']}",
+            "id_suffix": "nikto_scan_end_time"
+        })
+
+    # Chunk 15: Scan Summary - Elapsed Time
+    if scan_summary.get('elapsed_time'):
+        chunks.append({
+            "text": f"Nikto Scan Elapsed Time: {scan_summary['elapsed_time']}",
+            "id_suffix": "nikto_scan_elapsed_time"
+        })
+
+    return chunks
+
+
 def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report_type: str) -> str:
     """
     Orchestrates the chunking and embedding process for a newly loaded report,
@@ -1020,6 +1166,8 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_mobsf_android_report(parsed_report_data)
     elif report_type.lower() == "mobsf_ios": # New condition for Mobsf iOS
         raw_chunks_with_metadata = _chunk_mobsf_ios_report(parsed_report_data)
+    elif report_type.lower() == "nikto": # New condition for nikto
+        raw_chunks_with_metadata = _chunk_nikto_report(parsed_report_data)
     else:
         print(f"Warning: Unknown report type '{report_type}'. Cannot chunk report.")
         return ""

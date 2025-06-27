@@ -39,14 +39,48 @@ DEFAULT_SUMMARIZE_MAX_TOKENS = 1000 # Max tokens for generated chat history summ
 # These keywords help determine if a question is about the uploaded report.
 # Refined from previous version to avoid overly generic terms.
 REPORT_SPECIFIC_KEYWORDS = [
+    # General Report/Scan Keywords (common across tools)
     "report", "scan", "host", "ip", "port", "vulnerability", "alert", "cve",
     "solution", "remediation", "finding", "risk", "instance", "site", "version",
-    "mac address", "os detection", "service", "script", "traceroute", "tcp", "udp",
-    "os", "detected", "os guesses", "nmap", "scan", "report", "host", "ip address", "port", 
-    "service", "os detection","traceroute", "latency", "mac address", "open port",
-    "filtered port", "closed port", "script output", "version detection", "url","target",
-    "aggressive scan", "syn scan", "udp scan", "on the report", "in this report", "from this scan"
-    # Specific actions/requests that apply to a *given* report
-    "this report", "the report", "current report", "this scan", "the scan"
-]
+    "target", "implications", "remediation steps", "summary", "key findings",
+    "this report", "the report", "current report", "this scan", "the scan",
+    "on the report", "in this report", "from this scan", "overall posture",
 
+    # Tool-Specific Identifiers (for routing questions to the correct report)
+    "nikto", "sslscan", "mobsf", "zap", "nmap", "mobsf_android", "mobsf_ios",
+
+    # Nikto-specific keywords
+    "web server", "http server", "header", "headers", "x-frame-options", 
+    "strict-transport-security", "x-content-type-options", "anti-clickjacking",
+    "uncommon header", "x-served-by", "x-github-request-id", "x-fastly-request-id",
+    "x-timer", "varnish", "cache", "cdn", "fastly", "clickjacking", "mime type",
+    "mime-sniffing", "web vulnerability", "server configuration", "http methods", "uri",
+
+    # Nmap-specific keywords
+    "nmap scan", "port scan", "service detection", "os detection", "os fingerprinting",
+    "mac address", "os guesses", "traceroute", "tcp", "udp", "open port",
+    "filtered port", "closed port", "script output", "version detection", 
+    "aggressive scan", "syn scan", "udp scan", "service", "script", "latency",
+    "port state", "host status", "firewall", "router", "hop", "vendor",
+
+    # ZAP (OWASP ZAP) specific keywords
+    "zap scan", "owasp zap", "active scan", "passive scan", "spider", "ajax spider",
+    "api scan", "rest api", "soap api", "graphql", "authentication", "session management",
+    "broken access control", "sql injection", "xss", "cross-site scripting", 
+    "csrf", "cross-site request forgery", "ssrf", "server-side request forgery",
+    "insecure deserialization", "vulnerable component", "misconfiguration", 
+    "security misconfiguration", "sensitive data exposure", "logging and monitoring",
+    "external redirect", "directory listing", "header missing", "cookie flag",
+    "alert message", "risk level", "confidence level", "plugin", "rule", "context",
+    "authenticated scan", "unauthenticated scan", "scan policy", "automation",
+
+    # MobSF (Mobile Security Framework) specific keywords
+    "mobsf scan", "mobile app", "android", "ios", "apk", "ipa", "app security",
+    "static analysis", "dynamic analysis", "malware analysis", "permissions", 
+    "api calls", "certificate analysis", "code analysis", "binary analysis",
+    "manifest analysis", "network security", "privacy", "data leakage",
+    "hardcoded secret", "insecure storage", "encryption", "obfuscation",
+    "debugger detection", "root detection", "jailbreak detection", "frida", "objection",
+    "security score", "code quality", "info leak", "ssl pinning", "webview",
+    "deeplink", "firebase", "api key", "exported component", "vulnerable function"
+]

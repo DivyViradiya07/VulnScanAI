@@ -498,6 +498,88 @@ def _format_mobsf_ios_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     
     return prompt
 
+def _format_nikto_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Crafts a detailed prompt for the LLM based on Nikto parsed data.
+    Focuses on host details, scan summary, and identified findings.
+    """
+    prompt = (
+        "As a cybersecurity analyst, analyze the following Nikto Web Server Scan Report "
+        "and provide:\n"
+        "1. A concise summary of the scan results, including the target host, port, HTTP server, and overall security posture based on findings.\n"
+        "2. Key findings regarding missing security headers (e.g., X-Frame-Options, Strict-Transport-Security, X-Content-Type-Options) and identified uncommon headers.\n"
+        "3. Potential security implications for any identified weaknesses (e.g., missing security headers allowing clickjacking, MIME-sniffing, or insecure transport).\n"
+        "4. Actionable remediation steps to improve the web server's security configuration.\n"
+        "5. Provide Statistics, the test links, references, and any other relevant information from the report.\n"
+        "6.If nothing found then just provide the information extracted form the report.\n"
+        "The report data is in JSON format. Do not invent information not present in the report.\n\n"
+        "--- Nikto Report Data ---\n"
+    )
+
+    # Add scan metadata
+    metadata = parsed_data.get("scan_metadata", {})
+    prompt += f"Tool: {metadata.get('tool', 'N/A')}\n"
+    prompt += f"Host Summary Start Time: {metadata.get('start_time_host_summary', 'N/A')}\n"
+    prompt += f"Host Summary End Time: {metadata.get('end_time_host_summary', 'N/A')}\n"
+    prompt += f"Host Summary Elapsed Time: {metadata.get('elapsed_time_host_summary', 'N/A')}\n\n"
+
+    # Add Host Details
+    host_details = parsed_data.get("host_details", {})
+    prompt += "Host Details:\n"
+    prompt += f" - Hostname: {host_details.get('hostname', 'N/A')}\n"
+    prompt += f" - IP: {host_details.get('ip', 'N/A')}\n"
+    prompt += f" - Port: {host_details.get('port', 'N/A')}\n"
+    prompt += f" - HTTP Server: {host_details.get('http_server', 'N/A')}\n"
+    prompt += f" - Site Link (Name): {host_details.get('site_link_name', 'N/A')}\n"
+    prompt += f" - Site Link (IP): {host_details.get('site_link_ip', 'N/A')}\n"
+    
+    statistics = host_details.get("statistics", {})
+    if statistics:
+        prompt += " - Statistics:\n"
+        prompt += f"   - Requests: {statistics.get('requests', 'N/A')}\n"
+        prompt += f"   - Errors: {statistics.get('errors', 'N/A')}\n"
+        prompt += f"   - Findings: {statistics.get('findings', 'N/A')}\n"
+    prompt += "\n"
+
+    # Add Findings
+    findings = parsed_data.get("findings", [])
+    if findings:
+        prompt += "Identified Findings:\n"
+        for i, finding in enumerate(findings):
+            prompt += f"Finding {i + 1}:\n"
+            prompt += f" - URI: {finding.get('uri', 'N/A')}\n"
+            prompt += f" - HTTP Method: {finding.get('http_method', 'N/A')}\n"
+            prompt += f" - Description: {finding.get('description', 'N/A')}\n"
+            if finding.get('test_links'):
+                prompt += " - Test Links:\n"
+                for link in finding['test_links']:
+                    prompt += f"   - {link}\n"
+            if finding.get('references'):
+                prompt += " - References:\n"
+                for ref in finding['references']:
+                    prompt += f"   - {ref}\n"
+            prompt += "\n"
+
+    # Add Scan Summary
+    scan_summary = parsed_data.get("scan_summary", {})
+    if scan_summary:
+        prompt += "Scan Summary:\n"
+        prompt += f" - Software: {scan_summary.get('software', 'N/A')}\n"
+        prompt += f" - CLI Options: {scan_summary.get('cli_options', 'N/A')}\n"
+        prompt += f" - Hosts Tested: {scan_summary.get('hosts_tested', 'N/A')}\n"
+        prompt += f" - Scan Start Time: {scan_summary.get('start_time', 'N/A')}\n"
+        prompt += f" - Scan End Time: {scan_summary.get('end_time', 'N/A')}\n"
+        prompt += f" - Scan Elapsed Time: {scan_summary.get('elapsed_time', 'N/A')}\n"
+    prompt += "\n"
+
+    prompt += "--- End Nikto Report Data ---\n"
+    prompt += "Please provide the summary, key findings, implications, and remediation steps based on the above. "
+    prompt += "Format your response with clear headings: 'Summary', 'Key Findings', 'Implications', 'Remediation Steps'."
+    
+    return prompt
+
+
+
 def summarize_report_with_llm(
     llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str
 ) -> str:
@@ -519,10 +601,12 @@ def summarize_report_with_llm(
         prompt = _format_zap_summary_prompt(parsed_data)
     elif report_type.lower() == "sslscan": # New condition for SSLScan
         prompt = _format_sslscan_summary_prompt(parsed_data)
-    elif report_type.lower() == "mobsf_android": # New condition for SSLScan
+    elif report_type.lower() == "mobsf_android": # New condition for Mobsf Android
         prompt = _format_mobsf_android_summary_prompt(parsed_data)
-    elif report_type.lower() == "mobsf_ios": # New condition for SSLScan
+    elif report_type.lower() == "mobsf_ios": # New condition for Mobsf iOS
         prompt = _format_mobsf_ios_summary_prompt(parsed_data)
+    elif report_type.lower() == "nikto": # New condition for nikto
+        prompt = _format_nikto_summary_prompt(parsed_data)
     else:
         return "Error: Unsupported report type for summarization. Please specify 'nmap', 'zap', or 'sslscan'."
 

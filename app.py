@@ -24,6 +24,7 @@ try:
     from chatbot_modules.ssl_parser import process_sslscan_report_file
     from chatbot_modules.mobsf_android_parser import process_mobsf_android_report_file
     from chatbot_modules.mobsf_ios_parser import process_mobsf_ios_report_file
+    from chatbot_modules.nikto_parser import process_nikto_report_file
     from chatbot_modules.summarizer import summarize_report_with_llm, summarize_chat_history_segment
     from chatbot_modules.pdf_extractor import extract_text_from_pdf
     from chatbot_modules.utils import (
@@ -167,6 +168,10 @@ def detect_report_type_web(pdf_path: str) -> Optional[str]:
         if any(keyword in lower_text for keyword in mobsf_ios_keywords):
             return "mobsf_ios"
 
+        nikto_keywords = ["DetailsNikto", "nikto report", "nikto version:", "alert detail", "summary of alerts", "risk level", "cwe id"]
+        if any(keyword in lower_text for keyword in nikto_keywords):
+            return "nikto"
+
         return None
     except Exception as e:
         app.logger.error(f"Error during report type detection: {e}")
@@ -234,6 +239,50 @@ def is_report_specific_question_web(question: str) -> bool:
         if report_data.get("ssl_certificate", {}).get("issuer", "").lower() in question_lower:
             return True
         if "tls" in question_lower or "ssl" in question_lower or "cipher" in question_lower or "certificate" in question_lower:
+            return True
+
+    elif "nikto" in report_tool:
+        host_details = report_data.get("host_details", {})
+        scan_summary = report_data.get("scan_summary", {})
+
+        # Check host details
+        if host_details.get("hostname") and host_details["hostname"].lower() in question_lower:
+            return True
+        if host_details.get("ip") and host_details["ip"].lower() in question_lower:
+            return True
+        if host_details.get("port") and str(host_details["port"]) in question_lower:
+            return True
+        if host_details.get("http_server") and host_details["http_server"].lower() in question_lower:
+            return True
+        if host_details.get("site_link_name") and host_details["site_link_name"].lower() in question_lower:
+            return True
+        if host_details.get("site_link_ip") and host_details["site_link_ip"].lower() in question_lower:
+            return True
+
+        # Check scan summary details
+        if scan_summary.get("software") and scan_summary["software"].lower() in question_lower:
+            return True
+        # Check for presence of CLI options generally, as details can be long
+        if "cli options" in question_lower and scan_summary.get("cli_options"):
+            return True
+        
+        # Check individual findings (descriptions, URIs, methods, references)
+        for finding in report_data.get("findings", []):
+            if finding.get("description") and finding["description"].lower() in question_lower:
+                return True
+            if finding.get("uri") and finding["uri"].lower() in question_lower:
+                return True
+            if finding.get("http_method") and finding["http_method"].lower() in question_lower:
+                return True
+            if finding.get("references"):
+                if any(ref.lower() in question_lower for ref in finding["references"]):
+                    return True
+
+        # Broad keywords relevant to Nikto scans
+        if "nikto" in question_lower or "web server" in question_lower or "header" in question_lower or \
+           "vulnerability" in question_lower or "finding" in question_lower or "security" in question_lower or \
+           "http" in question_lower or "site" in question_lower or "host" in question_lower or \
+           "cdn" in question_lower or "request id" in question_lower or "varnish" in question_lower:
             return True
 
     elif "mobsf" in report_tool and "android" in report_tool:
@@ -381,6 +430,8 @@ def upload_report():
                 parsed_data = process_mobsf_android_report_file(filepath)
             elif report_type.lower() == 'mobsf_ios':
                 parsed_data = process_mobsf_ios_report_file(filepath)
+            elif report_type.lower() == 'nikto':
+                parsed_data = process_nikto_report_file(filepath)
 
             if parsed_data:
                 session['current_parsed_report'] = parsed_data
