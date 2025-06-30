@@ -1,13 +1,16 @@
 import os
 import sys
 import json
-from flask import Flask, request, jsonify, render_template, session, g
-from werkzeug.utils import secure_filename
-from datetime import datetime
-import atexit
+import logging
+import uuid
 import threading
 import time
-from typing import Dict, Any, List, Optional # Import Optional here
+from typing import Dict, Any, List, Optional
+
+# FastAPI imports
+from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 # Ensure the 'chatbot_modules' directory is in the Python path for module imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,14 +43,16 @@ except ImportError as e:
     print("Please ensure all modules are correctly configured in your Python path.")
     sys.exit(1)
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24) # Set a secret key for session management
+# Initialize logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = FastAPI()
 
 # Configuration for file uploads
 UPLOAD_FOLDER = os.path.join(current_dir, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max file size
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max file size
 
 # Global state for LLM and RAG components (loaded once)
 _llm_instance_global = None
@@ -57,91 +62,120 @@ _pinecone_index_instance_global = None
 # A lock to prevent multiple threads from initializing LLM/RAG simultaneously
 _init_lock = threading.Lock()
 
+# In-memory session store (replace with Redis/DB for production)
+_session_store: Dict[str, Dict[str, Any]] = {}
+
+# --- Pydantic Models for Request Bodies ---
+class ChatMessage(BaseModel):
+    """Pydantic model for incoming chat messages."""
+    message: str
+    session_id: str
+
+class ClearChatRequest(BaseModel):
+    """Pydantic model for clearing a chat session."""
+    session_id: str
+
 def _init_global_llm_and_rag():
-    """Initializes global LLM and RAG components if they haven't been already."""
+    """
+    Initializes global LLM and RAG components if they haven't been already.
+    This function uses a lock to ensure thread-safe initialization.
+    """
     global _llm_instance_global, _embedding_model_instance_global, _pinecone_index_instance_global
 
     with _init_lock:
         if _llm_instance_global is None:
-            print("Initializing global LLM instance...")
+            logger.info("Initializing global LLM instance...")
             try:
                 _llm_instance_global = load_model(
                     model_id=config.LLM_MODEL_ID,
                     model_basename=config.LLM_MODEL_BASENAME,
                     local_dir=config.LLM_MODEL_DIR
                 )
-                print("Global LLM instance loaded.")
+                logger.info("Global LLM instance loaded.")
             except Exception as e:
-                print(f"Failed to load global LLM instance: {e}")
+                logger.error(f"Failed to load global LLM instance: {e}")
                 _llm_instance_global = None
+                # Consider raising an exception here if LLM is critical for app function
                 return
 
         if _embedding_model_instance_global is None:
-            print("Initializing global embedding model...")
+            logger.info("Initializing global embedding model...")
             try:
                 _embedding_model_instance_global = load_embedding_model()
-                print("Global embedding model loaded.")
+                logger.info("Global embedding model loaded.")
             except Exception as e:
-                print(f"Failed to load global embedding model: {e}")
+                logger.error(f"Failed to load global embedding model: {e}")
                 _embedding_model_instance_global = None
 
         if _pinecone_index_instance_global is None and _embedding_model_instance_global is not None:
-            print("Initializing global Pinecone index...")
+            logger.info("Initializing global Pinecone index...")
             try:
                 _pinecone_index_instance_global = initialize_pinecone_index()
-                print("Global Pinecone index initialized.")
+                logger.info("Global Pinecone index initialized.")
             except Exception as e:
-                print(f"Failed to initialize global Pinecone index: {e}")
+                logger.error(f"Failed to initialize global Pinecone index: {e}")
                 _pinecone_index_instance_global = None
 
 def get_llm_instance():
-    """Returns the global LLM instance, initializing if necessary."""
+    """
+    Returns the global LLM instance, initializing if necessary.
+    Raises HTTPException if LLM instance cannot be loaded.
+    """
     if _llm_instance_global is None:
         _init_global_llm_and_rag()
+    if _llm_instance_global is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="LLM instance not available.")
     return _llm_instance_global
 
 def get_embedding_model_instance():
-    """Returns the global embedding model instance, initializing if necessary."""
+    """
+    Returns the global embedding model instance, initializing if necessary.
+    """
     if _embedding_model_instance_global is None:
         _init_global_llm_and_rag()
     return _embedding_model_instance_global
 
 def get_pinecone_index_instance():
-    """Returns the global Pinecone index instance, initializing if necessary."""
+    """
+    Returns the global Pinecone index instance, initializing if necessary.
+    """
     if _pinecone_index_instance_global is None:
         _init_global_llm_and_rag()
     return _pinecone_index_instance_global
 
 
-# Register cleanup for LLM and Pinecone at app shutdown
-@atexit.register
-def cleanup_resources():
-    """Ensures LLM and Pinecone resources are properly cleaned up on application exit."""
+@app.on_event("startup")
+async def startup_event():
+    """Initializes global resources when the FastAPI app starts."""
+    logger.info("FastAPI app startup event - Initializing global LLM and RAG components.")
+    _init_global_llm_and_rag()
+    logger.info("Global resources initialization complete.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleans up global resources when the FastAPI app shuts down."""
     global _llm_instance_global, _embedding_model_instance_global, _pinecone_index_instance_global
 
-    print("Cleaning up global resources...")
-    # The current_report_namespace deletion is handled in /upload_report and /clear_chat
-    # as it depends on Flask's session context which is not available here.
-
-    # Close LLM model
+    logger.info("FastAPI app shutdown event - Cleaning up global resources...")
+    
+    # Close LLM model if it has a close method
     if _llm_instance_global is not None:
         try:
             if hasattr(_llm_instance_global, 'close') and callable(_llm_instance_global.close):
                 _llm_instance_global.close()
-                print("Global LLM model closed.")
+                logger.info("Global LLM model closed.")
             _llm_instance_global = None
         except Exception as e:
-            print(f"Error during global LLM model closing: {e}")
+            logger.error(f"Error during global LLM model closing: {e}")
 
-    # Pinecone connection is usually managed by the client library and doesn't require explicit close
     _embedding_model_instance_global = None
     _pinecone_index_instance_global = None
-    print("Resources cleanup complete.")
+    logger.info("Global resources cleanup complete.")
 
 
 def detect_report_type_web(pdf_path: str) -> Optional[str]:
     """
-    Attempts to detect the type of the security report (Nmap, ZAP, SSLScan, MobSF Android, MobSF iOS)
+    Attempts to detect the type of the security report (Nmap, ZAP, SSLScan, MobSF Android, MobSF iOS, Nikto)
     by reading a small portion of its text and looking for keywords.
     """
     try:
@@ -168,21 +202,20 @@ def detect_report_type_web(pdf_path: str) -> Optional[str]:
         if any(keyword in lower_text for keyword in mobsf_ios_keywords):
             return "mobsf_ios"
 
-        nikto_keywords = ["DetailsNikto", "nikto report", "nikto version:", "alert detail", "summary of alerts", "risk level", "cwe id"]
+        nikto_keywords = ["detailsnikto", "nikto report", "nikto version:", "vulnerability id", "http server header", "cwe", "osvdb"]
         if any(keyword in lower_text for keyword in nikto_keywords):
             return "nikto"
 
         return None
     except Exception as e:
-        app.logger.error(f"Error during report type detection: {e}")
+        logger.error(f"Error during report type detection: {e}")
         return None
 
-def is_report_specific_question_web(question: str) -> bool:
+def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) -> bool:
     """
-    Heuristically determines if a question is specific to the loaded Nmap/ZAP/SSLScan report.
-    This check uses the session's current_parsed_report.
+    Heuristically determines if a question is specific to the loaded Nmap/ZAP/SSLScan/MobSF/Nikto report.
+    This check uses the provided report_data.
     """
-    report_data = session.get('current_parsed_report')
     if not report_data:
         return False
 
@@ -378,162 +411,178 @@ def is_report_specific_question_web(question: str) -> bool:
 
     return False
 
+@app.post("/upload_report")
+async def upload_report(file: UploadFile = File(...)):
+    """
+    Handles PDF file uploads, parses them, and generates an initial summary.
+    Returns a session_id for subsequent interactions.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No file provided.')
+    
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid file type. Please upload a PDF.')
 
-@app.route('/')
-def index():
-    """Renders the main chat interface page."""
-    # Ensure all session variables are cleared on fresh load
-    session.clear()
-    return render_template('index.html')
+    # FastAPI handles content length check automatically via server configuration
+    # but a manual check can be added if needed before file read.
+    # if file.size > MAX_CONTENT_LENGTH:
+    #     raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f'File too large. Max size is {MAX_CONTENT_LENGTH / (1024 * 1024)} MB.')
 
-@app.route('/upload_report', methods=['POST'])
-def upload_report():
-    """Handles PDF file uploads, parses them, and generates an initial summary."""
-    if 'pdf_file' not in request.files:
-        return jsonify({'success': False, 'message': 'No file part'}), 400
+    filename = f"{uuid.uuid4()}_{file.filename}" # Use UUID to prevent name collisions
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
 
-    file = request.files['pdf_file']
-    if file.filename == '':
-        return jsonify({'success': False, 'message': 'No selected file'}), 400
-
-    if file and file.filename.lower().endswith('.pdf'):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    try:
+        # Save the uploaded file
+        with open(filepath, "wb") as buffer:
+            content = await file.read() # Asynchronously read file content
+            buffer.write(content)
         
-        # Ensure old temporary files are cleaned up or overwritten if needed
+        session_id = str(uuid.uuid4())
+        _session_store[session_id] = {
+            'chat_history': [],
+            'current_parsed_report': None,
+            'current_report_type': None,
+            'current_report_namespace': None
+        }
+
+        report_type = detect_report_type_web(filepath)
+        if report_type is None:
+            os.remove(filepath)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, 
+                                detail='Could not detect report type (Nmap, ZAP, SSLScan, MobSF Android, MobSF iOS, Nikto).')
+
+        parsed_data = None
+        if report_type.lower() == 'nmap':
+            parsed_data = process_nmap_report_file(filepath)
+        elif report_type.lower() == 'zap':
+            parsed_data = process_zap_report_file(filepath)
+        elif report_type.lower() == 'sslscan':
+            parsed_data = process_sslscan_report_file(filepath)
+        elif report_type.lower() == 'mobsf_android':
+            parsed_data = process_mobsf_android_report_file(filepath)
+        elif report_type.lower() == 'mobsf_ios':
+            parsed_data = process_mobsf_ios_report_file(filepath)
+        elif report_type.lower() == 'nikto':
+            parsed_data = process_nikto_report_file(filepath)
+
+        if parsed_data:
+            session_data = _session_store[session_id]
+            session_data['current_parsed_report'] = parsed_data
+            session_data['current_report_type'] = report_type.lower()
+            session_data['chat_history'] = [] # Re-initialize chat history for new report
+
+            # Load report chunks and upsert to temporary Pinecone namespace
+            embedding_model = get_embedding_model_instance()
+            pinecone_index = get_pinecone_index_instance()
+
+            if embedding_model and pinecone_index:
+                report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type)
+                if report_namespace:
+                    session_data['current_report_namespace'] = report_namespace
+                    logger.info(f"Report data loaded into namespace: {report_namespace} for session {session_id}")
+                else:
+                    logger.warning(f"Failed to load report data into Pinecone namespace for session {session_id}.")
+            else:
+                logger.warning("RAG components (embedding model or Pinecone) not available. Proceeding without report RAG.")
+            
+            llm_instance = get_llm_instance() # This will raise HTTPException if LLM is not loaded
+            initial_summary = summarize_report_with_llm(llm_instance, parsed_data, report_type)
+            session_data['chat_history'].append({"role": "assistant", "content": initial_summary})
+            
+            return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id})
+        else:
+            os.remove(filepath)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                                detail=f'Failed to parse {report_type.upper()} report. No data returned.')
+
+    except HTTPException as e:
         if os.path.exists(filepath):
             os.remove(filepath)
-        file.save(filepath)
+        raise e # Re-raise FastAPI HTTPExceptions
+    except Exception as e:
+        logger.error(f"Error processing report: {e}", exc_info=True)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'An error occurred: {e}')
+    finally:
+        # Clean up the temporary file after processing, regardless of success or failure
+        if os.path.exists(filepath):
+            os.remove(filepath)
 
-        # Clear previous session data for a new report
-        if session.get('current_report_namespace'):
-            try:
-                delete_report_namespace(session['current_report_namespace'])
-            except Exception as e:
-                app.logger.warning(f"Failed to delete old namespace: {e}")
-        session.clear() # Clear all session data
-
-        try:
-            report_type = detect_report_type_web(filepath)
-            if report_type is None:
-                os.remove(filepath)
-                return jsonify({'success': False, 'message': 'Could not detect report type (Nmap, ZAP, SSLScan, MobSF Android, MobSF iOS).'}), 400
-
-            parsed_data = None
-            if report_type.lower() == 'nmap':
-                parsed_data = process_nmap_report_file(filepath)
-            elif report_type.lower() == 'zap':
-                parsed_data = process_zap_report_file(filepath)
-            elif report_type.lower() == 'sslscan':
-                parsed_data = process_sslscan_report_file(filepath)
-            elif report_type.lower() == 'mobsf_android':
-                parsed_data = process_mobsf_android_report_file(filepath)
-            elif report_type.lower() == 'mobsf_ios':
-                parsed_data = process_mobsf_ios_report_file(filepath)
-            elif report_type.lower() == 'nikto':
-                parsed_data = process_nikto_report_file(filepath)
-
-            if parsed_data:
-                session['current_parsed_report'] = parsed_data
-                session['current_report_type'] = report_type.lower()
-                session['chat_history'] = []
-
-                # Load report chunks and upsert to temporary Pinecone namespace
-                embedding_model = get_embedding_model_instance()
-                pinecone_index = get_pinecone_index_instance()
-
-                if embedding_model and pinecone_index:
-                    report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type)
-                    if report_namespace:
-                        session['current_report_namespace'] = report_namespace
-                        app.logger.info(f"Report data loaded into namespace: {report_namespace}")
-                    else:
-                        app.logger.warning("Failed to load report data into Pinecone namespace.")
-                else:
-                    app.logger.warning("RAG components (embedding model or Pinecone) not available. Proceeding without report RAG.")
-                
-                llm_instance = get_llm_instance()
-                if llm_instance:
-                    initial_summary = summarize_report_with_llm(llm_instance, parsed_data, report_type)
-                    session['chat_history'].append({"role": "assistant", "content": initial_summary})
-                    return jsonify({'success': True, 'summary': initial_summary, 'report_loaded': True})
-                else:
-                    return jsonify({'success': False, 'message': 'LLM not loaded. Cannot generate summary.'}), 500
-
-            else:
-                os.remove(filepath)
-                return jsonify({'success': False, 'message': f'Failed to parse {report_type.upper()} report. No data returned.'}), 500
-
-        except Exception as e:
-            app.logger.error(f"Error processing report: {e}", exc_info=True)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            return jsonify({'success': False, 'message': f'An error occurred: {e}'}), 500
-    else:
-        return jsonify({'success': False, 'message': 'Invalid file type. Please upload a PDF.'}), 400
-
-@app.route('/chat', methods=['POST'])
-def chat():
+@app.post("/chat")
+async def chat(chat_message: ChatMessage):
     """Handles user chat messages and returns AI responses."""
-    user_question = request.json.get('message')
-    if not user_question:
-        return jsonify({'success': False, 'message': 'No message provided'}), 400
+    session_id = chat_message.session_id
+    user_question = chat_message.message
 
-    llm_instance = get_llm_instance()
-    if not llm_instance:
-        return jsonify({'success': False, 'message': 'LLM is not initialized. Please restart the server or check logs.'}), 500
+    if session_id not in _session_store:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found. Please upload a report first or provide a valid session ID.")
+    
+    session_data = _session_store[session_id]
 
-    chat_history = session.get('chat_history', [])
-    current_parsed_report = session.get('current_parsed_report')
-    current_report_type = session.get('current_report_type')
-    current_report_namespace = session.get('current_report_namespace')
+    llm_instance = get_llm_instance() # Will raise HTTPException if not loaded
+
+    chat_history = session_data.get('chat_history', [])
+    current_parsed_report = session_data.get('current_parsed_report')
+    current_report_type = session_data.get('current_report_type')
+    current_report_namespace = session_data.get('current_report_namespace')
 
     chat_history.append({"role": "user", "content": user_question})
 
     # --- Chat History Management (Sliding Window) ---
     if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
-        app.logger.info(f"Chat history exceeding {config.CHAT_HISTORY_MAX_TURNS} turns. Summarizing older segments.")
-        segment_to_summarize = chat_history[0 : len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD]
+        logger.info(f"Chat history exceeding {config.CHAT_HISTORY_MAX_TURNS} turns for session {session_id}. Summarizing older segments.")
+        # Ensure we don't try to summarize an empty or too small segment
+        segment_end_index = len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD
+        segment_to_summarize = chat_history[0 : segment_end_index]
         
         if segment_to_summarize:
             summarized_segment_text = summarize_chat_history_segment(llm_instance, segment_to_summarize)
             new_chat_history = [{"role": "system", "content": f"Summary of previous conversation: {summarized_segment_text}"}]
-            new_chat_history.extend(chat_history[len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD:])
+            new_chat_history.extend(chat_history[segment_end_index:])
             chat_history = new_chat_history
-            session['chat_history'] = chat_history
-            app.logger.info("Chat history summarized.")
+            session_data['chat_history'] = chat_history
+            logger.info(f"Chat history summarized for session {session_id}.")
         else:
-            app.logger.info("No segment to summarize based on threshold.")
+            logger.info(f"No segment to summarize based on threshold for session {session_id}.")
 
     llm_prompt_content = ""
     rag_context = ""
 
-    if current_parsed_report and is_report_specific_question_web(user_question):
-        app.logger.info("Determined as report-specific question - attempting INTERNAL RAG.")
-        if current_report_namespace and get_embedding_model_instance() and get_pinecone_index_instance():
+    # Determine if the question is report-specific and apply internal RAG if applicable
+    if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
+        logger.info(f"Determined as report-specific question for session {session_id} - attempting INTERNAL RAG.")
+        embedding_model = get_embedding_model_instance()
+        pinecone_index = get_pinecone_index_instance()
+
+        if current_report_namespace and embedding_model and pinecone_index:
             rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
             else:
                 llm_prompt_content += "No specific relevant information found in the current report for this query. "
-                app.logger.info("No INTERNAL RAG context found for report-specific question.")
+                logger.info(f"No INTERNAL RAG context found for report-specific question for session {session_id}.")
         else:
             llm_prompt_content += "Internal RAG components not available or report not loaded into Pinecone. Answering based on initial summary and general knowledge.\n"
-            app.logger.warning("Internal RAG not available for report-specific question.")
+            logger.warning(f"Internal RAG not available for report-specific question for session {session_id}.")
         
         llm_prompt_content += f"The user is asking a question related to the previously provided {current_report_type.upper()} security report. Please refer to the report's content and your previous summary to answer.\n"
     else:
-        app.logger.info("Determined as general cybersecurity question - attempting EXTERNAL RAG.")
-        if get_embedding_model_instance() and get_pinecone_index_instance():
+        # If not report-specific, attempt external RAG
+        logger.info(f"Determined as general cybersecurity question for session {session_id} - attempting EXTERNAL RAG.")
+        embedding_model = get_embedding_model_instance()
+        pinecone_index = get_pinecone_index_instance()
+
+        if embedding_model and pinecone_index:
             rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") 
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
             else:
                 llm_prompt_content += "No specific relevant information found in the knowledge base for this query. "
-                app.logger.info("No EXTERNAL RAG context found.")
+                logger.info(f"No EXTERNAL RAG context found for session {session_id}.")
         else:
             llm_prompt_content += "RAG components not loaded or initialized. Answering based on general knowledge and chat history.\n"
-            app.logger.warning("RAG components not available for general question.")
+            logger.warning(f"RAG components not available for general question for session {session_id}.")
 
     concatenated_prompt = ""
     for msg in chat_history:
@@ -550,34 +599,46 @@ def chat():
         llm_response = llm_generate_response(llm_instance, final_llm_prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
         
         chat_history.append({"role": "assistant", "content": llm_response})
-        session['chat_history'] = chat_history # Update session after adding response
+        session_data['chat_history'] = chat_history # Update session data
 
-        return jsonify({'success': True, 'response': llm_response, 'chat_history': chat_history})
+        return JSONResponse(content={'success': True, 'response': llm_response, 'chat_history': chat_history})
 
     except Exception as e:
-        app.logger.error(f"Error generating LLM response: {e}", exc_info=True)
+        logger.error(f"Error generating LLM response for session {session_id}: {e}", exc_info=True)
+        # If LLM generation fails, remove the last user message from history to prevent bad state
         if chat_history and chat_history[-1]["role"] == "user":
-            chat_history.pop() # Remove user message if assistant failed
-        session['chat_history'] = chat_history # Update session
-        return jsonify({'success': False, 'message': f'An error occurred while generating response: {e}'}), 500
+            chat_history.pop() 
+        session_data['chat_history'] = chat_history # Ensure session data is updated
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'An error occurred while generating response: {e}')
 
-@app.route('/clear_chat', methods=['POST'])
-def clear_chat():
-    """Clears the current chat session, including deleting the Pinecone namespace."""
-    if session.get('current_report_namespace'):
-        try:
-            delete_report_namespace(session['current_report_namespace'])
-            app.logger.info(f"Deleted Pinecone namespace: {session['current_report_namespace']}")
-        except Exception as e:
-            app.logger.warning(f"Error deleting namespace during clear_chat: {e}")
+@app.post("/clear_chat")
+async def clear_chat(request_body: ClearChatRequest):
+    """
+    Clears the current chat session for a given session ID,
+    including deleting the associated Pinecone namespace if it exists.
+    """
+    session_id = request_body.session_id
+
+    if session_id not in _session_store:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     
-    session.clear()
-    return jsonify({'success': True, 'message': 'Chat and report context cleared.'})
+    session_data = _session_store[session_id]
 
-if __name__ == '__main__':
-    print("Starting Flask app...")
-    # Initialize global LLM and RAG components on app start-up
-    _init_global_llm_and_rag()
-    # Disable Flask's default development server banner to prevent Windows error 6
-    # This specifically addresses the OSError: [WinError 6] The handle is invalid.
-    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False) # Added use_reloader=False
+    if session_data.get('current_report_namespace'):
+        try:
+            delete_report_namespace(session_data['current_report_namespace'])
+            logger.info(f"Deleted Pinecone namespace: {session_data['current_report_namespace']} for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Error deleting namespace during clear_chat for session {session_id}: {e}")
+    
+    # Remove session data from the store
+    del _session_store[session_id]
+    logger.info(f"Chat and report context cleared for session {session_id}.")
+    
+    return JSONResponse(content={'success': True, 'message': 'Chat and report context cleared.'})
+
+# To run this FastAPI application, save this code as, for example, `app.py`.
+# Then, execute the following command in your terminal:
+# uvicorn app:app --host 0.0.0.0 --port 5000 --reload
+# The '--reload' flag is useful for development as it restarts the server on code changes.
+# For production, remove '--reload' and ensure your environment is set up correctly.

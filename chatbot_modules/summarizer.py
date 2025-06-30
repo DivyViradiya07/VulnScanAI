@@ -512,6 +512,7 @@ def _format_nikto_summary_prompt(parsed_data: Dict[str, Any]) -> str:
         "4. Actionable remediation steps to improve the web server's security configuration.\n"
         "5. Provide Statistics, the test links, references, and any other relevant information from the report.\n"
         "6.If nothing found then just provide the information extracted form the report.\n"
+        "7.Say Preper zap scan over nikto as no relevent information is found.\n"
         "The report data is in JSON format. Do not invent information not present in the report.\n\n"
         "--- Nikto Report Data ---\n"
     )

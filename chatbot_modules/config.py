@@ -5,10 +5,17 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --- LLM Model Configuration ---
+# Local LLM (llama-cpp-python)
 LLM_MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
 LLM_MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
 # Path to store the downloaded GGUF model, relative to PROJECT_ROOT
 LLM_MODEL_DIR = os.path.join(PROJECT_ROOT, "pretrained_language_model")
+
+# Gemini API Configuration
+# IMPORTANT: Store your Gemini API key as an environment variable for security.
+# Example: GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") # Default to empty string if not set
+GEMINI_MODEL_NAME = "gemini-2.0-flash" # Or "gemini-pro", etc.
 
 # --- RAG (Retrieval Augmented Generation) Configuration ---
 # Path to your fine-tuned SentenceTransformer model, relative to PROJECT_ROOT
