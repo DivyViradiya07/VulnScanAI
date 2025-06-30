@@ -1,6 +1,7 @@
 import os
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
+import asyncio # <--- ADD THIS LINE
 
 def load_model(model_id: str, model_basename: str, local_dir: str = "models") -> Llama:
     """
@@ -26,42 +27,39 @@ def load_model(model_id: str, model_basename: str, local_dir: str = "models") ->
             repo_id=model_id,
             filename=model_basename,
             local_dir=local_dir,
-            force_download=False # Set to True to re-download even if exists
+            local_dir_use_symlinks=False # Use False to ensure physical download for llama.cpp
         )
         print("Download complete.")
     else:
-        print(f"Model found locally at {model_path}.")
+        print(f"Model already exists at {model_path}. Loading...")
 
-    num_cpu_threads = os.cpu_count() or 4
-    # Initialize and return a llama_cpp.Llama instance 
-    # Adjust n_ctx and n_gpu_layers as needed for your system
-    model = Llama(
+    # Initialize the Llama model
+    # n_gpu_layers is set to -1 to offload all layers to the GPU if CUDA is available,
+    # or 0 to use CPU. Adjust based on your system's GPU memory.
+    llm = Llama(
         model_path=model_path,
-        n_ctx=4096,      # Context window size 
-        n_gpu_layers=20, # Offload all layers to GPU if available. Set to 0 for CPU only. 
-        n_threads=num_cpu_threads, # Number of CPU threads to use
-        f16_kv=True, # Use half-precision for key-value cache
-        verbose=False    # Set to True for more loading details
+        n_ctx=4096,  # Context window size (adjust based on model capability and memory)
+        n_threads=os.cpu_count() // 2 or 1, # Use half of available CPU cores
+        n_gpu_layers=-1, # -1 to enable GPU acceleration if supported
+        verbose=False # Set to True for more detailed logging from llama_cpp
     )
-    print("Language model loaded successfully.")
-    return model
+    return llm
 
-def generate_response(model_instance: Llama, prompt: str, max_tokens: int = 500) -> str:
+# Make the generate_response function async
+async def generate_response(llm: Llama, prompt: str, max_tokens: int = 2048) -> str:
     """
-    Generates a response from the language model instance.
-    Formats the prompt correctly for your chosen model (e.g., Mistral's <s>[INST]...[/INST]) 
-    and calls model_instance.create_chat_completion or model_instance() for inference.
+    Generates a response from the loaded Llama model.
     Args:
-        model_instance (Llama): The loaded model instance.
-        prompt (str): The input prompt for the model.
-        max_tokens (int): The maximum number of tokens to generate in the response.
+        llm (Llama): The loaded Llama model instance.
+        prompt (str): The input prompt string.
+        max_tokens (int): The maximum number of tokens to generate.
     Returns:
-        str: The generated response from the model.
+        str: The generated response text.
     """
-    response = model_instance.create_chat_completion(
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
+    # Run the synchronous create_chat_completion in a thread pool to avoid blocking the event loop
+    response = await asyncio.to_thread(
+        llm.create_chat_completion,
+        messages=[{"role": "user", "content": prompt}],
         max_tokens=max_tokens,
         temperature=0.7, # A common default, can be tuned
         stop=["</s>"] # Common stop token, can be expanded
@@ -75,23 +73,31 @@ if __name__ == "__main__":
     # This uses the same model_id and filename as in the S3_Model_Download.ipynb
     MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
     MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
-    MODEL_DIR = r"D:\VulnScanAI\pretrained_language_model"
+    # Adjust this path if your pretrained_language_model folder is elsewhere
+    MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pretrained_language_model")
 
     print("--- Testing Model Loading ---")
     try:
         # Load the model
         model = load_model(MODEL_ID, MODEL_BASENAME, MODEL_DIR)
 
-        # Test generating a response
-        test_prompt = "What is the capital of France?"
-        print(f"\n--- Testing Model Response for prompt: '{test_prompt}' ---")
-        generated_text = generate_response(model, test_prompt, max_tokens=50)
-        print(f"Generated Response: {generated_text}")
+        # Test generating a response (now needs to be awaited)
+        import asyncio
+        
+        async def test_generation():
+            test_prompt = "What is the capital of France?"
+            print(f"\n--- Testing Model Response for prompt: '{test_prompt}' ---")
+            generated_text = await generate_response(model, test_prompt, max_tokens=50)
+            print(f"Generated Response: {generated_text}")
 
-        test_prompt_2 = "Explain what an Nmap SYN scan is in one sentence."
-        print(f"\n--- Testing Model Response for prompt: '{test_prompt_2}' ---")
-        generated_text_2 = generate_response(model, test_prompt_2, max_tokens=50)
-        print(f"Generated Response: {generated_text_2}")
+            test_prompt_2 = "Explain what an Nmap SYN scan is in one sentence."
+            print(f"\n--- Testing Model Response for prompt: '{test_prompt_2}' ---")
+            generated_text_2 = await generate_response(model, test_prompt_2, max_tokens=100)
+            print(f"Generated Response: {generated_text_2}")
+
+        asyncio.run(test_generation())
 
     except Exception as e:
-        print(f"An error occurred during model testing: {e}")
+        print(f"An error occurred during testing: {e}")
+        import traceback
+        traceback.print_exc()

@@ -6,6 +6,10 @@ import uuid
 import threading
 import time
 from typing import Dict, Any, List, Optional
+import dotenv
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
 
 # FastAPI imports
 from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status
@@ -21,13 +25,17 @@ if chatbot_modules_path not in sys.path:
 # Import core modules from chatbot_modules
 try:
     from chatbot_modules import config
-    from chatbot_modules.local_llm import load_model, generate_response as llm_generate_response
+    # Changed: Import local_llm and gemini_llm as modules
+    import chatbot_modules.local_llm as local_llm_module
+    import chatbot_modules.gemini_llm as gemini_llm_module
+
     from chatbot_modules.nmap_parser import process_nmap_report_file
     from chatbot_modules.zap_parser import process_zap_report_file
     from chatbot_modules.ssl_parser import process_sslscan_report_file
     from chatbot_modules.mobsf_android_parser import process_mobsf_android_report_file
     from chatbot_modules.mobsf_ios_parser import process_mobsf_ios_report_file
     from chatbot_modules.nikto_parser import process_nikto_report_file
+    # The summarizer imports remain the same, but their internal calls will change
     from chatbot_modules.summarizer import summarize_report_with_llm, summarize_chat_history_segment
     from chatbot_modules.pdf_extractor import extract_text_from_pdf
     from chatbot_modules.utils import (
@@ -55,7 +63,8 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max file size
 
 # Global state for LLM and RAG components (loaded once)
-_llm_instance_global = None
+_llm_instances_global: Dict[str, Any] = {} # To hold {'local': local_llm_instance, 'gemini': gemini_llm_instance}
+_llm_generate_funcs_global: Dict[str, Any] = {} # To hold {'local': local_generate_func, 'gemini': gemini_generate_func}
 _embedding_model_instance_global = None
 _pinecone_index_instance_global = None
 
@@ -80,24 +89,46 @@ def _init_global_llm_and_rag():
     Initializes global LLM and RAG components if they haven't been already.
     This function uses a lock to ensure thread-safe initialization.
     """
-    global _llm_instance_global, _embedding_model_instance_global, _pinecone_index_instance_global
+    global _llm_instances_global, _llm_generate_funcs_global, _embedding_model_instance_global, _pinecone_index_instance_global
 
     with _init_lock:
-        if _llm_instance_global is None:
-            logger.info("Initializing global LLM instance...")
+        if not _llm_instances_global: # Only initialize LLMs if not already done
+            logger.info("Initializing global LLM instances...")
+            
+            # --- Initialize Local LLM ---
             try:
-                _llm_instance_global = load_model(
+                local_model_instance = local_llm_module.load_model(
                     model_id=config.LLM_MODEL_ID,
                     model_basename=config.LLM_MODEL_BASENAME,
                     local_dir=config.LLM_MODEL_DIR
                 )
-                logger.info("Global LLM instance loaded.")
+                _llm_instances_global["local"] = local_model_instance
+                _llm_generate_funcs_global["local"] = local_llm_module.generate_response
+                logger.info("Local LLM initialized successfully.")
             except Exception as e:
-                logger.error(f"Failed to load global LLM instance: {e}")
-                _llm_instance_global = None
-                # Consider raising an exception here if LLM is critical for app function
-                return
+                logger.error(f"Failed to initialize Local LLM: {e}")
+                # Decide if this should be a fatal error or just disable local LLM
 
+            # --- Initialize Gemini LLM (only if API key is set) ---
+            if config.GEMINI_API_KEY:
+                try:
+                    # gemini_llm.py's load_model takes args, kwargs
+                    gemini_model_instance = gemini_llm_module.load_model(
+                        api_key=config.GEMINI_API_KEY # Pass the API key if needed by the loader
+                    )
+                    _llm_instances_global["gemini"] = gemini_model_instance
+                    _llm_generate_funcs_global["gemini"] = gemini_llm_module.generate_response
+                    logger.info("Gemini LLM initialized successfully.")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize Gemini LLM (API key might be missing or invalid): {e}")
+            else:
+                logger.info("Skipping Gemini LLM initialization: GEMINI_API_KEY not found in environment.")
+
+            # If neither LLM could be initialized, raise an error
+            if not _llm_instances_global:
+                raise RuntimeError("No LLM could be initialized. Please check your configuration and environment variables.")
+            
+        # --- RAG Initialization (remains the same as before) ---
         if _embedding_model_instance_global is None:
             logger.info("Initializing global embedding model...")
             try:
@@ -121,11 +152,11 @@ def get_llm_instance():
     Returns the global LLM instance, initializing if necessary.
     Raises HTTPException if LLM instance cannot be loaded.
     """
-    if _llm_instance_global is None:
+    if _llm_instances_global is None:
         _init_global_llm_and_rag()
-    if _llm_instance_global is None:
+    if _llm_instances_global is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="LLM instance not available.")
-    return _llm_instance_global
+    return _llm_instances_global
 
 def get_embedding_model_instance():
     """
@@ -154,21 +185,21 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleans up global resources when the FastAPI app shuts down."""
-    global _llm_instance_global, _embedding_model_instance_global, _pinecone_index_instance_global
+    global _llm_instances_global, _embedding_model_instance_global, _pinecone_index_instance_global
 
     logger.info("FastAPI app shutdown event - Cleaning up global resources...")
     
     # Close LLM model if it has a close method
-    if _llm_instance_global is not None:
+    if _llm_instances_global is not None:
         try:
-            if hasattr(_llm_instance_global, 'close') and callable(_llm_instance_global.close):
-                _llm_instance_global.close()
+            if hasattr(_llm_instances_global, 'close') and callable(_llm_instances_global.close):
+                _llm_instances_global.close()
                 logger.info("Global LLM model closed.")
-            _llm_instance_global = None
+            _llm_instances_global = None
         except Exception as e:
             logger.error(f"Error during global LLM model closing: {e}")
 
-    _embedding_model_instance_global = None
+    _embedding_model_instances_global = None
     _pinecone_index_instance_global = None
     logger.info("Global resources cleanup complete.")
 
@@ -411,22 +442,39 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
 
     return False
 
+from fastapi import File, UploadFile, HTTPException, status, Query # Import Query for query parameters
+
 @app.post("/upload_report")
-async def upload_report(file: UploadFile = File(...)):
+async def upload_report(
+    file: UploadFile = File(...),
+    # Add llm_mode as a query parameter with a default value from config
+    llm_mode: str = Query(config.DEFAULT_LLM_MODE, description=f"Choose LLM mode: {config.SUPPORTED_LLM_MODES}")
+):
     """
     Handles PDF file uploads, parses them, and generates an initial summary.
     Returns a session_id for subsequent interactions.
     """
+    logger.info(f"Received file upload: {file.filename} with LLM mode: {llm_mode}")
+
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No file provided.')
     
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid file type. Please upload a PDF.')
 
-    # FastAPI handles content length check automatically via server configuration
-    # but a manual check can be added if needed before file read.
-    # if file.size > MAX_CONTENT_LENGTH:
-    #     raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f'File too large. Max size is {MAX_CONTENT_LENGTH / (1024 * 1024)} MB.')
+    # Validate the chosen LLM mode
+    if llm_mode not in config.SUPPORTED_LLM_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid LLM mode. Supported modes are: {config.SUPPORTED_LLM_MODES}"
+        )
+    
+    # Check if the chosen LLM is actually initialized and available globally
+    if llm_mode not in _llm_instances_global:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Chosen LLM mode '{llm_mode}' is not initialized on the server. Please check server logs for LLM initialization errors."
+        )
 
     filename = f"{uuid.uuid4()}_{file.filename}" # Use UUID to prevent name collisions
     filepath = os.path.join(UPLOAD_FOLDER, filename)
@@ -442,8 +490,11 @@ async def upload_report(file: UploadFile = File(...)):
             'chat_history': [],
             'current_parsed_report': None,
             'current_report_type': None,
-            'current_report_namespace': None
+            'current_report_namespace': None,
+            'llm_mode': llm_mode # Store the chosen LLM mode in the session
         }
+        logger.info(f"Session {session_id} created with LLM mode: {llm_mode}")
+
 
         report_type = detect_report_type_web(filepath)
         if report_type is None:
@@ -485,10 +536,20 @@ async def upload_report(file: UploadFile = File(...)):
             else:
                 logger.warning("RAG components (embedding model or Pinecone) not available. Proceeding without report RAG.")
             
-            llm_instance = get_llm_instance() # This will raise HTTPException if LLM is not loaded
-            initial_summary = summarize_report_with_llm(llm_instance, parsed_data, report_type)
+            # Retrieve the selected LLM instance and its generate function
+            llm_instance_for_session = _llm_instances_global[llm_mode]
+            llm_generate_func_for_session = _llm_generate_funcs_global[llm_mode]
+
+            # Pass both the LLM instance and its generate function to the summarizer
+            initial_summary = await summarize_report_with_llm(
+                llm_instance_for_session, 
+                llm_generate_func_for_session, 
+                parsed_data, 
+                report_type
+            )
             session_data['chat_history'].append({"role": "assistant", "content": initial_summary})
-            
+            logger.info(f"Initial summary generated for session {session_id}. Summary length: {len(initial_summary)} chars.")
+
             return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id})
         else:
             os.remove(filepath)
@@ -520,7 +581,23 @@ async def chat(chat_message: ChatMessage):
     
     session_data = _session_store[session_id]
 
-    llm_instance = get_llm_instance() # Will raise HTTPException if not loaded
+    # Retrieve the LLM mode stored for this session, default to 'local' if not found
+    llm_mode = session_data.get('llm_mode', config.DEFAULT_LLM_MODE) 
+    
+    # Select the appropriate LLM instance and generate function for this session
+    llm_instance_for_session = _llm_instances_global.get(llm_mode)
+    llm_generate_func_for_session = _llm_generate_funcs_global.get(llm_mode)
+
+    # Validate that the selected LLM is actually available/initialized
+    if not llm_instance_for_session or not llm_generate_func_for_session:
+        # This case should ideally not happen if _init_global_llm_and_rag is robust
+        # and llm_mode is always stored, but good for defensive programming.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"LLM mode '{llm_mode}' is not initialized or available for this session. Please clear chat and re-upload report."
+        )
+
+    logger.info(f"Processing chat for session {session_id} using LLM mode: {llm_mode}")
 
     chat_history = session_data.get('chat_history', [])
     current_parsed_report = session_data.get('current_parsed_report')
@@ -532,12 +609,17 @@ async def chat(chat_message: ChatMessage):
     # --- Chat History Management (Sliding Window) ---
     if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
         logger.info(f"Chat history exceeding {config.CHAT_HISTORY_MAX_TURNS} turns for session {session_id}. Summarizing older segments.")
-        # Ensure we don't try to summarize an empty or too small segment
         segment_end_index = len(chat_history) - config.CHAT_HISTORY_SUMMARIZE_THRESHOLD
         segment_to_summarize = chat_history[0 : segment_end_index]
         
         if segment_to_summarize:
-            summarized_segment_text = summarize_chat_history_segment(llm_instance, segment_to_summarize)
+            # Pass the selected LLM instance and generate function to the summarizer
+            summarized_segment_text = await summarize_chat_history_segment(
+                llm_instance_for_session, 
+                llm_generate_func_for_session, 
+                segment_to_summarize,
+                max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS # Ensure this config exists
+            )
             new_chat_history = [{"role": "system", "content": f"Summary of previous conversation: {summarized_segment_text}"}]
             new_chat_history.extend(chat_history[segment_end_index:])
             chat_history = new_chat_history
@@ -596,7 +678,8 @@ async def chat(chat_message: ChatMessage):
     final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
 
     try:
-        llm_response = llm_generate_response(llm_instance, final_llm_prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
+        # Use the dynamically selected generate_response function
+        llm_response = await llm_generate_func_for_session(llm_instance_for_session, final_llm_prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
         
         chat_history.append({"role": "assistant", "content": llm_response})
         session_data['chat_history'] = chat_history # Update session data
@@ -604,7 +687,7 @@ async def chat(chat_message: ChatMessage):
         return JSONResponse(content={'success': True, 'response': llm_response, 'chat_history': chat_history})
 
     except Exception as e:
-        logger.error(f"Error generating LLM response for session {session_id}: {e}", exc_info=True)
+        logger.error(f"Error generating LLM response for session {session_id} using {llm_mode} LLM: {e}", exc_info=True)
         # If LLM generation fails, remove the last user message from history to prevent bad state
         if chat_history and chat_history[-1]["role"] == "user":
             chat_history.pop() 

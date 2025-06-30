@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Callable
 import os
 import sys
 import dotenv
@@ -13,21 +13,9 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Assuming local_llm.py is in the same directory or accessible via PYTHONPATH
-from local_llm import generate_response, load_model # Import generate_response and load_model directly
-# Also import config for default max tokens for summarization
 from chatbot_modules import config 
 
 
-class Llama:
-    """
-    Dummy Llama class for type hinting if llama_cpp is not installed during development.
-    In a real scenario, you would import Llama directly from llama_cpp.
-    """
-    def __init__(self, *args, **kwargs):
-        pass
-    def create_chat_completion(self, *args, **kwargs):
-        pass
 
 def _format_nmap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
@@ -581,55 +569,76 @@ def _format_nikto_summary_prompt(parsed_data: Dict[str, Any]) -> str:
 
 
 
-def summarize_report_with_llm(
-    llm_instance: Llama, parsed_data: Dict[str, Any], report_type: str
+async def summarize_report_with_llm( # Added 'async' keyword here
+    llm_instance: Any, 
+    generate_response_func: Callable[[Any, str, int], str], 
+    parsed_data: Dict[str, Any], 
+    report_type: str
 ) -> str:
     """
     Generates a natural language summary and remediation steps for a parsed security report
-    using the local LLM.
+    using the provided LLM instance and its generation function.
 
     Args:
-        llm_instance (Llama): The loaded Llama model instance.
+        llm_instance (Any): The loaded LLM model instance (e.g., Llama, GenerativeModel).
+        generate_response_func (Callable): The function responsible for generating a response
+                                           from the given LLM instance, prompt, and max_tokens.
         parsed_data (Dict[str, Any]): The structured dictionary parsed from the report.
-        report_type (str): The type of the report ("nmap", "zap", or "sslscan").
+        report_type (str): The type of the report.
 
     Returns:
         str: The generated explanation and remediation steps from the LLM.
     """
+    prompt = ""
     if report_type.lower() == "nmap":
         prompt = _format_nmap_summary_prompt(parsed_data)
     elif report_type.lower() == "zap":
         prompt = _format_zap_summary_prompt(parsed_data)
-    elif report_type.lower() == "sslscan": # New condition for SSLScan
+    elif report_type.lower() == "sslscan":
         prompt = _format_sslscan_summary_prompt(parsed_data)
-    elif report_type.lower() == "mobsf_android": # New condition for Mobsf Android
+    elif report_type.lower() == "mobsf_android":
         prompt = _format_mobsf_android_summary_prompt(parsed_data)
-    elif report_type.lower() == "mobsf_ios": # New condition for Mobsf iOS
+    elif report_type.lower() == "mobsf_ios":
         prompt = _format_mobsf_ios_summary_prompt(parsed_data)
-    elif report_type.lower() == "nikto": # New condition for nikto
+    elif report_type.lower() == "nikto":
         prompt = _format_nikto_summary_prompt(parsed_data)
     else:
-        return "Error: Unsupported report type for summarization. Please specify 'nmap', 'zap', or 'sslscan'."
+        # Generic summary for unrecognized report types
+        prompt = (
+            "As a cybersecurity analyst, provide a concise summary of the key findings, vulnerabilities, "
+            "and recommended remediation steps from the following security report:\n\n"
+            f"{json.dumps(parsed_data, indent=2)}"
+        )
+        print(f"Warning: Unsupported report type '{report_type}' for specific prompt formatting. Using generic summary prompt.")
+
 
     print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
 
     try:
-        llm_response = generate_response(llm_instance, prompt, max_tokens=config.DEFAULT_MAX_TOKENS)
+        # Call the passed generate_response_func
+        llm_response = await generate_response_func(llm_instance, prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
         return llm_response
     except Exception as e:
-        return f"Error generating LLM response: {e}"
+        print(f"Error generating LLM response for {report_type} summary: {e}")
+        return f"Error generating summary for {report_type} report. Please try again. Details: {e}"
 
 
-def summarize_chat_history_segment(
-    llm_instance: Any, history_segment: List[Dict[str, str]], max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
+
+async def summarize_chat_history_segment( # Added 'async' keyword here
+    llm_instance: Any, 
+    generate_response_func: Callable[[Any, str, int], str], # New argument: the specific generate_response function
+    history_segment: List[Dict[str, str]], 
+    max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
 ) -> str:
     """
     Uses the LLM to summarize a segment of the chat history.
 
     Args:
-        llm_instance (Any): The loaded Llama model instance.
+        llm_instance (Any): The loaded LLM model instance (e.g., Llama, GenerativeModel).
+        generate_response_func (Callable): The function responsible for generating a response
+                                           from the given LLM instance, prompt, and max_tokens.
         history_segment (List[Dict[str, str]]): A list of message dictionaries
-                                                 (e.g., [{'role': 'user', 'content': '...'}, ...]).
+                                                    (e.g., [{'role': 'user', 'content': '...'}, ...]).
         max_tokens (int): Maximum tokens for the summary.
 
     Returns:
@@ -654,9 +663,8 @@ def summarize_chat_history_segment(
     print(f"\n--- Sending chat history segment to LLM for summarization (length: {len(summarization_prompt)} chars) ---")
 
     try:
-        # Call generate_response with the summarization prompt
-        # We enforce a smaller max_tokens for summarization to keep it concise
-        summary_response = generate_response(llm_instance, summarization_prompt, max_tokens=max_tokens)
+        # Call generate_response_func (now awaited as it's an async function)
+        summary_response = await generate_response_func(llm_instance, summarization_prompt, max_tokens=max_tokens)
         return summary_response.strip()
     except Exception as e:
         print(f"Error generating history summary: {e}")
@@ -855,4 +863,3 @@ if __name__ == "__main__":
     
     # Restore original generate_response after testing
     generate_response = _original_generate_response
-

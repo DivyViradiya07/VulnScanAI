@@ -4,6 +4,9 @@ import os
 # This assumes config.py is in chatbot_modules, and project root is one level up.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+DEFAULT_LLM_MODE = "local"  # or "gemini"
+SUPPORTED_LLM_MODES = ["local", "gemini"]
+
 # --- LLM Model Configuration ---
 # Local LLM (llama-cpp-python)
 LLM_MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
